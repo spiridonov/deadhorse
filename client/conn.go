@@ -91,11 +91,9 @@ func (c *shardConn) exchange(ctx context.Context, validEntries []deadhorse.Reque
 
 	// Captured once, locally: closeLocked (below, or from a later call once
 	// we unlock) can reassign or nil out the c.conn *field* at any time, and
-	// the watcher goroutine below runs unsynchronized with that. Operating
-	// on this local copy of the net.Conn value instead avoids a data race on
-	// the field -- calling a method on an already-closed net.Conn is a
-	// well-defined error return, never a panic, so a watcher that fires late
-	// (after this call already returned) is harmless.
+	// the watcher below runs unsynchronized with that. Operating on this
+	// local copy of the net.Conn value instead avoids a data race on the
+	// field.
 	conn := c.conn
 
 	deadline := time.Now().Add(timeout)
@@ -106,16 +104,19 @@ func (c *shardConn) exchange(ctx context.Context, validEntries []deadhorse.Reque
 
 	// Honor ctx cancellation even before the deadline above by forcing an
 	// immediate deadline if ctx is done first, which unblocks the blocking
-	// Write/Read below.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			conn.SetDeadline(time.Now())
-		case <-stop:
-		}
-	}()
+	// Write/Read below. context.AfterFunc (rather than a hand-rolled
+	// watcher goroutine selecting on ctx.Done() vs. a stop channel) matters
+	// here beyond style: a caller that cancels ctx right after Throttle
+	// returns -- the ordinary `ctx, cancel := context.WithTimeout(...);
+	// defer cancel()` pattern -- makes ctx.Done() and "this call already
+	// finished" become ready at nearly the same instant. A hand-rolled
+	// select can resolve in favor of ctx.Done() even then, calling
+	// SetDeadline on a connection that's already been handed back to the
+	// pool and picked up by a *different*, unrelated call -- aborting it
+	// with a spurious timeout. AfterFunc's stop() is specifically
+	// synchronized against a concurrent firing to close exactly this race.
+	stopWatch := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })
+	defer stopWatch()
 
 	if _, err := conn.Write([]byte(req)); err != nil {
 		c.closeLocked()
