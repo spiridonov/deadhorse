@@ -91,7 +91,8 @@ expiry timer or a periodic scan of every key, each stripe keeps **two map genera
 - Touching a key (in either mode) looks it up in `hot`; if it's only found in `cold`, it's
   promoted into `hot` first.
 - On a fixed interval, a background goroutine swaps every stripe's `cold` out and starts a fresh,
-  empty `hot` — an O(1) pointer swap per stripe, regardless of how many keys exist.
+  empty `hot` — an O(1) pointer swap per stripe, regardless of how many keys exist. The rest is done
+  by Go GC.
 
 A key that's touched at least once per interval never leaves `hot` and survives forever; a key
 that goes untouched for one to two intervals gets dropped for free, with no scan and no per-key
@@ -173,19 +174,6 @@ deadhorse -port=9000 -prometheus-port=9001
 Each server is a single static binary with no external dependencies of its own — no database, no
 coordination service, nothing to run besides the process itself.
 
-## Packages
-
-The module is split by audience, so importing one piece doesn't pull in the others:
-
-| Package | Contents | Who imports it |
-|---|---|---|
-| `deadhorse` | `RequestEntry`, `ResponseEntry`, `Limit`, the `Throttler` interface | everyone |
-| `deadhorse/client` | `ShardedClient`, the DHP/1 network client | a pure client of a remote DeadHorse fleet |
-| `deadhorse/server` | `InMemoryThrottler` (the GCRA engine) and `TextServer` (the DHP/1 server) | the `deadhorse` binary, or anyone embedding a server |
-
-A binary that only talks to a remote fleet never compiles in the GCRA engine, the striped store, or
-`TextServer` — it only needs the root package's types and `deadhorse/client`.
-
 ## Client libraries
 
 ### Go client
@@ -214,10 +202,9 @@ if results[0].Throttled {
 limit rather than silently becoming a no-op. `ShardedClient` fails **open** by default: if a shard
 can't be reached within its timeout (10ms by default, see `WithTimeout`), the affected entries are
 reported as not throttled rather than failing the caller's request — pass `WithFailClosed()` for
-limits where that's the wrong default (a quota that's also a billing control, say, rather than
-purely protective). This never applies to an entry rejected by local validation (an empty or
-malformed key): that's always reported as throttled, since a caller bug isn't something fail-open
-is meant to paper over.
+limits where that's the wrong default. This never applies to an entry rejected by local validation
+(an empty or malformed key): that's always reported as throttled, since a caller bug isn't something
+fail-open is meant to paper over.
 
 `err` is a join of every distinct problem `Throttle` ran into, for callers who just want a cheap
 "did anything go wrong" check; `results` is always fully populated at the same length as the
@@ -226,7 +213,7 @@ problem and why (see `client.ErrInvalidKey`, `client.ErrEntryRejected`) — `Thr
 holds a sensible value either way, so code that only reads `Throttled` works the same whether or
 not it checks the rest.
 
-### Embedding directly, no network at all
+### Embedding directly
 
 The same rate limiter that backs the server is a plain, importable type — useful for a
 single-process application that wants leaky-bucket limiting without running anything separately:
