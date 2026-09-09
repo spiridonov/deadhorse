@@ -1,11 +1,13 @@
 # DeadHorse
 
+[![Go](https://github.com/spiridonov/deadhorse/actions/workflows/go.yml/badge.svg)](https://github.com/spiridonov/deadhorse/actions/workflows/go.yml)
+
+> The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse/discover/).
+
 DeadHorse is a small, fast, distributed rate limiter. A DeadHorse server holds nothing but
 counters — the limit itself (how big the bucket is, how fast it drains) comes with every
 request. And it talks a plain, newline-delimited text protocol simple enough to implement a
 client for in any language with nothing more than a socket and a few string operations.
-
-> The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse/discover/).
 
 ```
 $ nc localhost 9000
@@ -243,3 +245,8 @@ results, err := throttler.Throttle(ctx, []deadhorse.RequestEntry{
 `InMemoryThrottler` implements the same `deadhorse.Throttler` interface `TextServer` is built on
 (and never returns a non-nil error itself -- a nonsensical limit just fails closed), so code written
 against it works unchanged whether the limiter lives in-process or behind the network protocol.
+
+
+## License
+
+DeadHorse is released under the [MIT License](https://opensource.org/licenses/MIT).
