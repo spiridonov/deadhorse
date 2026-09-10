@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	port           = flag.Int("port", 0, "The DHP/1 text protocol server port")
-	prometheusPort = flag.Int("prometheus-port", 0, "The Prometheus metrics port")
+	port           = flag.Int("port", 9000, "The DHP/1 text protocol server port")
+	prometheusPort = flag.Int("prometheus-port", 9090, "The Prometheus metrics port")
 	stripes        = flag.Int("stripes", 0, "Number of concurrency stripes in the key/bucket store (0 = default)")
 	gcInterval     = flag.Duration("gc-interval", 0, "How often idle keys are garbage-collected (0 = default)")
 	maxLineSize    = flag.Int("max-line-size", 0, "Maximum DHP/1 protocol line size in bytes (0 = default)")
@@ -32,7 +32,7 @@ func main() {
 	textServer := server.NewTextServer(throttler, *maxLineSize)
 	defer textServer.Close()
 
-	log.Println("Starting DeadHorse text protocol server...")
+	log.Printf("Starting DeadHorse text protocol server on port %d (metrics on port %d)...", *port, *prometheusPort)
 	if err := textServer.ListenAndServe(fmt.Sprintf("localhost:%d", *port)); err != nil {
 		log.Fatalf("text protocol server stopped: %v", err)
 	}

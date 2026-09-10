@@ -160,13 +160,13 @@ a firewall otherwise.
 
 ```sh
 go install github.com/spiridonov/deadhorse/cmd/deadhorse@latest
-deadhorse -port=9000 -prometheus-port=9001
+deadhorse
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-port` | 0 (OS-assigned) | DHP/1 text protocol port — set this explicitly in practice |
-| `-prometheus-port` | 0 (OS-assigned) | Serves `/metrics` (Go runtime/process stats, even with no application metrics registered) — set this explicitly too |
+| `-port` | 9000 | DHP/1 text protocol port |
+| `-prometheus-port` | 9090 | Serves `/metrics` (Go runtime/process stats, even with no application metrics registered) |
 | `-stripes` | 256 | Concurrency stripes in the in-memory store |
 | `-gc-interval` | 60s | How often idle keys are dropped |
 | `-max-line-size` | 64KiB | Longest protocol line accepted before the connection is closed |
