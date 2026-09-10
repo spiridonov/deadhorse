@@ -25,17 +25,51 @@ var ErrInvalidKey = errors.New("deadhorse: invalid key")
 // (a bad field on the wire), so there's no computed decision to trust.
 var ErrEntryRejected = errors.New("deadhorse: entry rejected by server")
 
-// shardConn is one persistent connection to one shard, reconnected lazily on
-// the next call after any error. A single mutex serializes request/response
-// pairs on it -- correct and simple; a client that needs more parallelism
-// against one shard should hold several ShardedClients or shardConns, not
-// something this type needs to grow pipelining to provide.
+// maxInFlight bounds how many THROTTLE calls a single shardConn will pipeline
+// onto its connection at once. A call beyond this simply waits its turn to
+// submit -- backpressure against a shard that's accepting writes faster than
+// it's answering them, rather than an unbounded, memory-growing queue.
+const maxInFlight = 256
+
+// idleReadTimeout bounds how long shardConn's reader will wait for a response
+// with nothing at all coming back, so a shard that accepted a connection but
+// then went silent forever eventually gets noticed and reconnected instead of
+// wedging the pipeline for good. It's deliberately generous and unrelated to
+// any per-call timeout: normal gaps between bursts of traffic are expected
+// and shouldn't cost a reconnect.
+const idleReadTimeout = 30 * time.Second
+
+// shardConn is one persistent, pipelined connection to one shard, reconnected
+// lazily on the next call after any error. Multiple Throttle calls may be in
+// flight on it concurrently: each submits its request and waits on its own
+// channel rather than holding the connection for the whole round trip, so one
+// slow call never blocks another's request from going out. This relies on
+// the server answering one connection's requests strictly in the order they
+// arrived (see TextServer.handleConn), which is what lets responses be
+// matched back to calls by plain FIFO order instead of a request ID.
 type shardConn struct {
 	addr string
 
-	mu     sync.Mutex
-	conn   net.Conn
-	reader *bufio.Reader
+	// mu guards conn and pending, and serializes submit's write+enqueue pair
+	// (see submit) so that wire order and queue order never diverge. It is
+	// deliberately not held across any blocking network read -- only reads
+	// and writes local to establishing/tearing down a connection.
+	mu      sync.Mutex
+	conn    net.Conn
+	pending chan *pendingCall
+}
+
+// pendingCall is one THROTTLE request waiting for its response. resultCh is
+// buffered so the reader loop's delivery never blocks on a caller that has
+// already given up (its ctx expired) and stopped listening.
+type pendingCall struct {
+	entries  []deadhorse.RequestEntry
+	resultCh chan pendingResult
+}
+
+type pendingResult struct {
+	results []deadhorse.ResponseEntry
+	err     error
 }
 
 // throttle validates keys locally first, so one malformed key doesn't spoil
@@ -72,83 +106,76 @@ func (c *shardConn) throttle(ctx context.Context, entries []deadhorse.RequestEnt
 	return results, errors.Join(errs...)
 }
 
-// exchange does the actual wire round trip for a batch of already-validated
-// entries and fills results at the positions named by validIdx. It returns
-// only a network/protocol-level error -- never a per-entry one, since a
-// per-entry ERR is not an exchange failure (see decodeResult).
+// exchange submits a batch of already-validated entries and waits for its
+// own response, without ever holding the connection for the duration of the
+// wait -- see submit and shardConn's pipelining doc comment. It returns only
+// a network/protocol-level error -- never a per-entry one, since a per-entry
+// ERR is not an exchange failure (see decodeResult).
 func (c *shardConn) exchange(ctx context.Context, validEntries []deadhorse.RequestEntry, timeout time.Duration, results []deadhorse.ResponseEntry, validIdx []int) error {
-	req := encodeThrottle(validEntries)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := c.ensureConnLocked(); err != nil {
-		return err
-	}
-
-	// Captured once, locally: closeLocked (below, or from a later call once
-	// we unlock) can reassign or nil out the c.conn *field* at any time, and
-	// the watcher below runs unsynchronized with that. Operating on this
-	// local copy of the net.Conn value instead avoids a data race on the
-	// field.
-	conn := c.conn
-
 	deadline := time.Now().Add(timeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	conn.SetDeadline(deadline)
+	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 
-	// Honor ctx cancellation even before the deadline above by forcing an
-	// immediate deadline if ctx is done first, which unblocks the blocking
-	// Write/Read below. context.AfterFunc (rather than a hand-rolled
-	// watcher goroutine selecting on ctx.Done() vs. a stop channel) matters
-	// here beyond style: a caller that cancels ctx right after Throttle
-	// returns -- the ordinary `ctx, cancel := context.WithTimeout(...);
-	// defer cancel()` pattern -- makes ctx.Done() and "this call already
-	// finished" become ready at nearly the same instant. A hand-rolled
-	// select can resolve in favor of ctx.Done() even then, calling
-	// SetDeadline on a connection that's already been handed back to the
-	// pool and picked up by a *different*, unrelated call -- aborting it
-	// with a spurious timeout. AfterFunc's stop() is specifically
-	// synchronized against a concurrent firing to close exactly this race.
-	stopWatch := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })
-	defer stopWatch()
+	call := &pendingCall{entries: validEntries, resultCh: make(chan pendingResult, 1)}
+	req := encodeThrottle(validEntries)
 
-	if _, err := conn.Write([]byte(req)); err != nil {
-		c.closeLocked()
-		return firstNonNil(ctx.Err(), err)
-	}
-
-	line, err := c.reader.ReadString('\n')
-	if err != nil {
-		c.closeLocked()
-		return firstNonNil(ctx.Err(), err)
-	}
-
-	validResults, err := decodeResult(line, validEntries)
-	if err != nil {
-		c.closeLocked()
+	if err := c.submit(waitCtx, call, req); err != nil {
 		return err
 	}
-	for j, idx := range validIdx {
-		results[idx] = validResults[j]
-	}
-	return nil
-}
 
-func firstNonNil(errs ...error) error {
-	for _, err := range errs {
-		if err != nil {
-			return err
+	select {
+	case res := <-call.resultCh:
+		if res.err != nil {
+			return res.err
 		}
+		for j, idx := range validIdx {
+			results[idx] = res.results[j]
+		}
+		return nil
+	case <-waitCtx.Done():
+		// call's response, if the shard eventually sends one, is still read
+		// by the connection's reader loop and simply dropped into resultCh's
+		// one-slot buffer unread -- the connection itself is left alone for
+		// every other call still pipelined on it.
+		return waitCtx.Err()
+	}
+}
+
+// submit enqueues call and writes req to the wire as a single unit under mu,
+// so the order calls are queued in always matches the order their requests
+// hit the wire -- required for the reader loop's FIFO response matching to
+// stay correct. ctx bounds how long submit will wait for room in a full
+// pending queue; it does not bound the write itself, which gets its own
+// deadline from ctx below.
+func (c *shardConn) submit(ctx context.Context, call *pendingCall, req string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.ensureConnLocked(); err != nil {
+		return err
+	}
+
+	select {
+	case c.pending <- call:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if d, ok := ctx.Deadline(); ok {
+		c.conn.SetWriteDeadline(d)
+	}
+	if _, err := c.conn.Write([]byte(req)); err != nil {
+		c.failLocked(err)
+		return err
 	}
 	return nil
 }
 
+// ensureConnLocked dials a fresh connection and starts its reader loop if
+// none is currently established. Caller must hold mu.
 func (c *shardConn) ensureConnLocked() error {
 	if c.conn != nil {
 		return nil
@@ -157,23 +184,99 @@ func (c *shardConn) ensureConnLocked() error {
 	if err != nil {
 		return err
 	}
+	pending := make(chan *pendingCall, maxInFlight)
 	c.conn = conn
-	c.reader = bufio.NewReader(conn)
+	c.pending = pending
+	go c.readLoop(conn, pending)
 	return nil
 }
 
-func (c *shardConn) closeLocked() {
-	if c.conn != nil {
-		c.conn.Close()
+// readLoop owns conn's read side for its entire lifetime: it reads one
+// response line at a time and delivers each to the oldest still-pending
+// call, relying on the server never answering a connection's requests out of
+// order. Any read or decode error desyncs that ordering for good, so it
+// takes the whole connection down with it via abort rather than trying to
+// recover.
+func (c *shardConn) readLoop(conn net.Conn, pending chan *pendingCall) {
+	r := bufio.NewReader(conn)
+	for {
+		conn.SetReadDeadline(time.Now().Add(idleReadTimeout))
+		line, err := r.ReadString('\n')
+		if err != nil {
+			c.abort(conn, pending, err)
+			return
+		}
+
+		var call *pendingCall
+		select {
+		case call = <-pending:
+		default:
+			c.abort(conn, pending, fmt.Errorf("deadhorse: response with nothing pending: %q", strings.TrimRight(line, "\r\n")))
+			return
+		}
+
+		results, err := decodeResult(line, call.entries)
+		call.resultCh <- pendingResult{results: results, err: err}
+		if err != nil {
+			c.abort(conn, pending, err)
+			return
+		}
+	}
+}
+
+// abort tears down conn and fails every call still waiting in pending with
+// err. It's called from the reader loop itself (outside mu, since it must
+// never block a concurrent submit on a network read), and only clears
+// shardConn's own conn/pending fields if they still refer to this exact
+// generation -- a concurrent submit may already have reconnected.
+func (c *shardConn) abort(conn net.Conn, pending chan *pendingCall, err error) {
+	c.mu.Lock()
+	if c.conn == conn {
 		c.conn = nil
-		c.reader = nil
+		c.pending = nil
+	}
+	c.mu.Unlock()
+
+	conn.Close()
+	drainPending(pending, err)
+}
+
+// failLocked is abort's counterpart for a write failure inside submit, where
+// mu is already held. It's safe to close and drain right here, without
+// releasing mu first: nothing else can observe or touch this generation's
+// conn/pending until submit returns.
+func (c *shardConn) failLocked(err error) {
+	conn := c.conn
+	pending := c.pending
+	c.conn = nil
+	c.pending = nil
+	if conn != nil {
+		conn.Close()
+	}
+	drainPending(pending, err)
+}
+
+func drainPending(pending chan *pendingCall, err error) {
+	for {
+		select {
+		case call := <-pending:
+			call.resultCh <- pendingResult{err: err}
+		default:
+			return
+		}
 	}
 }
 
 func (c *shardConn) close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.closeLocked()
+	conn := c.conn
+	c.conn = nil
+	c.pending = nil
+	c.mu.Unlock()
+
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 func validateKey(key string) error {

@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,6 +224,59 @@ func TestShardedClientContextCancellation(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Less(t, elapsed, 5*time.Second, "the context's short deadline should cut the call off well before the 10s client timeout")
+}
+
+// TestShardedClientConcurrentCallsAreCorrectlyMatched exercises shardConn's
+// pipelining directly: many calls in flight at once on the same connection,
+// each answered by the reader loop matching responses back to calls by
+// plain FIFO order (see shardConn's doc comment). Each key gets a distinct
+// capacity so its expected remaining count on the second hit is unique --
+// if the reader loop ever matched a response to the wrong call, at least
+// one key would come back with someone else's (differently-valued)
+// remaining count instead of its own, deterministically catching the
+// mismatch rather than relying on timing.
+func TestShardedClientConcurrentCallsAreCorrectlyMatched(t *testing.T) {
+	th := server.NewInMemoryThrottler(0, time.Hour)
+	defer th.Close()
+	addr := startServer(t, th)
+
+	// A generous timeout: this test's point is to fire n calls at once onto
+	// one connection, and 50-way contention on shardConn's submit mutex
+	// (especially under -race) can legitimately take longer than the
+	// client's normal small default timeout without anything being wrong.
+	c := NewShardedClient([]string{addr}, WithTimeout(2*time.Second))
+	defer c.Close()
+
+	const n = 50
+	entryFor := func(i int) deadhorse.RequestEntry {
+		return deadhorse.RequestEntry{
+			Key:   fmt.Sprintf("k-%d", i),
+			Limit: deadhorse.Limit{Capacity: int64(100 + i), EmissionInterval: time.Hour},
+		}
+	}
+
+	// Warm up: one hit per key, sequentially, so key i's bucket has exactly
+	// one unit consumed before the concurrent round.
+	for i := 0; i < n; i++ {
+		_, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{entryFor(i)})
+		require.NoError(t, err)
+	}
+
+	// All n second hits fire at once, pipelined onto the same connection.
+	// Remaining reports headroom *before* this hit is applied, so after one
+	// prior hit each key's second hit should report capacity-1.
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{entryFor(i)})
+			assert.NoError(t, err)
+			require.Len(t, r, 1)
+			assert.Equalf(t, int64(100+i-1), r[0].Remaining, "key k-%d got a response meant for a different call", i)
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestShardedClientNoOpThrottlerViaTextServer(t *testing.T) {
