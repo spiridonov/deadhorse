@@ -25,16 +25,31 @@ type TextServer struct {
 	maxLineSize int
 	startedAt   time.Time
 
-	// listenerMu guards listener, which is written by ListenAndServe and
-	// read by Close -- two methods meant to be called from different
+	// listenerMu guards listener and closed, written by ListenAndServe and
+	// Close respectively -- two methods meant to be called from different
 	// goroutines (Close is how you make a blocking ListenAndServe return).
+	// closed closes the TOCTOU gap between them: without it, a Close() that
+	// runs before ListenAndServe finishes net.Listen and assigns listener
+	// would see a nil listener, no-op, and leave ListenAndServe to bind and
+	// accept forever with nothing left able to stop it.
 	listenerMu sync.Mutex
 	listener   net.Listener
+	closed     bool
 }
 
 const (
 	protocolVersion    = "1"
 	defaultMaxLineSize = 64 * 1024
+
+	// idleReadTimeout bounds how long a connection may sit with nothing
+	// arriving before it's dropped, so a client that opens a connection and
+	// sends nothing (or a line with no trailing '\n') can't hold a
+	// goroutine, buffer, and socket open forever -- DHP/1 has no
+	// authentication, so this is the server's only defense against that.
+	// Deliberately generous and renewed on every line, like the client's
+	// own idleReadTimeout: normal gaps between bursts of traffic are
+	// expected and shouldn't cost a disconnect.
+	idleReadTimeout = 30 * time.Second
 )
 
 var errLineTooLong = errors.New("line too long")
@@ -60,7 +75,15 @@ func (s *TextServer) ListenAndServe(addr string) error {
 	if err != nil {
 		return err
 	}
+
 	s.listenerMu.Lock()
+	if s.closed {
+		// Close() already ran, before net.Listen above even returned --
+		// there's nothing left to bind and accept for.
+		s.listenerMu.Unlock()
+		lis.Close()
+		return net.ErrClosed
+	}
 	s.listener = lis
 	s.listenerMu.Unlock()
 
@@ -76,6 +99,7 @@ func (s *TextServer) ListenAndServe(addr string) error {
 func (s *TextServer) Close() error {
 	s.listenerMu.Lock()
 	lis := s.listener
+	s.closed = true
 	s.listenerMu.Unlock()
 
 	if lis == nil {
@@ -91,6 +115,7 @@ func (s *TextServer) handleConn(conn net.Conn) {
 	w := bufio.NewWriter(conn)
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(idleReadTimeout))
 		line, err := readLine(r, s.maxLineSize)
 		if errors.Is(err, errLineTooLong) {
 			w.WriteString("ERROR line too long\n")
@@ -198,15 +223,22 @@ func (s *TextServer) handleThrottle(rest string) string {
 	results := make([]string, len(tokens))
 	if len(entries) > 0 {
 		responses, err := s.throttler.Throttle(context.Background(), entries)
-		if responses == nil {
-			msg := "throttle failed"
-			if err != nil {
-				msg = err.Error()
+		switch {
+		case err != nil, len(responses) != len(entries):
+			// A throttler-level failure -- or a buggy custom Throttler
+			// returning a mismatched-length slice -- must not sink the
+			// whole line, only the entries actually sent to it (locally
+			// malformed entries are still reported as ERR below
+			// regardless). DHP/1 has no room for a message here, so ERR is
+			// the same "this entry failed" signal a per-entry Err already
+			// gets from formatResult.
+			for _, idx := range entryIdx {
+				results[idx] = "ERR"
 			}
-			return "ERROR " + msg
-		}
-		for j, resp := range responses {
-			results[entryIdx[j]] = formatResult(resp)
+		default:
+			for j, resp := range responses {
+				results[entryIdx[j]] = formatResult(resp)
+			}
 		}
 	}
 	for i, ok := range entryOK {

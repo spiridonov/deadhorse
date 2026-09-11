@@ -16,6 +16,15 @@ func TestNewStoreAppliesDefaults(t *testing.T) {
 	assert.Len(t, st.stripes, defaultStripes, "numStripes<=0 should fall back to defaultStripes")
 }
 
+func TestStoreCloseIsIdempotent(t *testing.T) {
+	st := newStore(0, time.Hour)
+	assert.NotPanics(t, func() {
+		st.close()
+		st.close()
+		st.close()
+	}, "close must tolerate being called more than once, e.g. via a deferred Close alongside an explicit early one")
+}
+
 func TestStripeForIsDeterministic(t *testing.T) {
 	st := newStore(16, time.Hour)
 	defer st.close()

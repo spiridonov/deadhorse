@@ -40,11 +40,17 @@ type RequestEntry struct {
 type ResponseEntry struct {
 	Key       string
 	Throttled bool
-	// Remaining is the bucket's current headroom in cost units, clamped to
-	// [0, Limit.Capacity].
+	// Remaining is the bucket's headroom in cost units as of just before
+	// this request, clamped to [0, Limit.Capacity] -- not affected by this
+	// request's own Cost or Throttled outcome. A request that itself gets
+	// admitted (or throttled) still reports the same Remaining a Peek at
+	// that same instant would have; it does not shrink by Cost just because
+	// this request consumed from the bucket.
 	Remaining int64
 	// RetryAfter is how long until this exact request would have fit. Zero
-	// when not throttled.
+	// when not throttled, or when this exact request could never fit under
+	// this Limit at all (e.g. Cost exceeds Limit.Capacity) -- in that case
+	// retrying, however long you wait, will not help.
 	RetryAfter time.Duration
 	// Err is non-nil if this entry couldn't be evaluated normally -- a
 	// validation problem (e.g. a key a wire client can't encode) or an

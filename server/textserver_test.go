@@ -180,6 +180,45 @@ func TestHandleThrottleMixedValidAndMalformedPreservesOrder(t *testing.T) {
 	assert.Equal(t, "RESULT ERR key|0|0|0", got)
 }
 
+// erroringThrottler always fails the whole call, as a buggy or overloaded
+// custom Throttler might.
+type erroringThrottler struct{}
+
+func (erroringThrottler) Throttle(context.Context, []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
+	return nil, errors.New("boom")
+}
+
+func TestHandleThrottleThrottlerErrorDoesNotSinkWholeBatch(t *testing.T) {
+	srv := NewTextServer(erroringThrottler{}, 0)
+	got := srv.handleThrottle("key-a|1|1000|1|R key-b|1|1000|1|R")
+	assert.Equal(t, "RESULT ERR ERR", got, "a throttler-level error must report ERR per affected entry, not abort the whole line")
+
+	// The connection-level behavior matters too: an aborted line used to
+	// return "ERROR ...", which handleConn would send verbatim but keep the
+	// connection open for -- but a caller reading responses positionally
+	// could still be desynced by a line that isn't RESULT-shaped. Confirm
+	// the line is always RESULT-shaped when there's at least one entry.
+	assert.True(t, strings.HasPrefix(got, "RESULT "))
+}
+
+// shortResponseThrottler returns fewer responses than it was asked to
+// evaluate, without an error -- a buggy custom Throttler violating its own
+// documented contract (see the Throttler interface in types.go).
+type shortResponseThrottler struct{}
+
+func (shortResponseThrottler) Throttle(_ context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return []deadhorse.ResponseEntry{{Key: entries[0].Key}}, nil
+}
+
+func TestHandleThrottleMismatchedResponseLengthDoesNotSinkWholeBatch(t *testing.T) {
+	srv := NewTextServer(shortResponseThrottler{}, 0)
+	got := srv.handleThrottle("key-a|1|1000|1|R key-b|1|1000|1|R")
+	assert.Equal(t, "RESULT ERR ERR", got, "a Throttler returning the wrong-length slice must be treated as a failure, not panic or leave entries blank")
+}
+
 // -----------------------------------------------------------------------
 // Integration-level tests: a real TextServer over a real TCP connection.
 // -----------------------------------------------------------------------
@@ -298,6 +337,18 @@ func TestTextServerCloseWithoutListenIsNoop(t *testing.T) {
 	assert.NoError(t, srv.Close())
 }
 
+func TestTextServerCloseBeforeListenAndServePreventsAcceptLoop(t *testing.T) {
+	// Regression test for the Close()/ListenAndServe() ordering race: if
+	// Close() runs (even just barely) before ListenAndServe finishes
+	// net.Listen and installs its listener, ListenAndServe must not go on
+	// to bind and accept forever with nothing left able to stop it.
+	srv := NewTextServer(&deadhorsetest.NoOpThrottler{}, 0)
+	require.NoError(t, srv.Close())
+
+	err := srv.ListenAndServe("127.0.0.1:0")
+	assert.ErrorIs(t, err, net.ErrClosed, "ListenAndServe must refuse to serve once Close has already been requested")
+}
+
 func TestTextServerPingPong(t *testing.T) {
 	addr := startTestServer(t, &deadhorsetest.NoOpThrottler{})
 	client := dialTestServer(t, addr)
@@ -384,6 +435,45 @@ func TestTextServerPipelining(t *testing.T) {
 	client.send("PING")
 	for i := 0; i < 3; i++ {
 		assert.Equal(t, "PONG", client.recv())
+	}
+}
+
+// readDeadlineRecorder wraps a net.Conn and captures every deadline passed
+// to SetReadDeadline, so a test can observe handleConn's idle-timeout
+// behavior without actually waiting out a real 30-second timeout.
+type readDeadlineRecorder struct {
+	net.Conn
+	deadlines chan time.Time
+}
+
+func (r *readDeadlineRecorder) SetReadDeadline(t time.Time) error {
+	select {
+	case r.deadlines <- t:
+	default:
+	}
+	return r.Conn.SetReadDeadline(t)
+}
+
+func TestHandleConnSetsIdleReadDeadline(t *testing.T) {
+	// Before the fix, a connection that never sent anything (or never sent
+	// a trailing '\n') was held open by handleConn forever -- no deadline
+	// was ever set on it at all. This asserts the mechanism directly
+	// (SetReadDeadline is called, with a generous-but-bounded deadline)
+	// rather than waiting out a real 30s timeout.
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	rec := &readDeadlineRecorder{Conn: serverSide, deadlines: make(chan time.Time, 1)}
+	srv := NewTextServer(&deadhorsetest.NoOpThrottler{}, 0)
+	go srv.handleConn(rec)
+
+	select {
+	case deadline := <-rec.deadlines:
+		remaining := time.Until(deadline)
+		assert.Greater(t, remaining, 20*time.Second, "an idle connection should get a generous deadline, not an unbounded read")
+		assert.LessOrEqual(t, remaining, idleReadTimeout, "deadline should not exceed idleReadTimeout")
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleConn never set a read deadline")
 	}
 }
 

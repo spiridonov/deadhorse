@@ -12,6 +12,7 @@ import (
 )
 
 var (
+	host           = flag.String("host", "", "The DHP/1 text protocol listen host (empty = all interfaces, matching -prometheus-port's default)")
 	port           = flag.Int("port", 9000, "The DHP/1 text protocol server port")
 	prometheusPort = flag.Int("prometheus-port", 9090, "The Prometheus metrics port")
 	stripes        = flag.Int("stripes", 0, "Number of concurrency stripes in the key/bucket store (0 = default)")
@@ -20,9 +21,9 @@ var (
 )
 
 func main() {
-	log.Println("Initializing...")
-
 	flag.Parse()
+
+	log.Println("Initializing...")
 
 	serveMetrics(*prometheusPort)
 
@@ -32,8 +33,9 @@ func main() {
 	textServer := server.NewTextServer(throttler, *maxLineSize)
 	defer textServer.Close()
 
-	log.Printf("Starting DeadHorse text protocol server on port %d (metrics on port %d)...", *port, *prometheusPort)
-	if err := textServer.ListenAndServe(fmt.Sprintf("localhost:%d", *port)); err != nil {
+	addr := fmt.Sprintf("%s:%d", *host, *port)
+	log.Printf("Starting DeadHorse text protocol server on %s (metrics on port %d)...", addr, *prometheusPort)
+	if err := textServer.ListenAndServe(addr); err != nil {
 		log.Fatalf("text protocol server stopped: %v", err)
 	}
 }

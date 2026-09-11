@@ -72,8 +72,9 @@ func (s *stripe) size() int {
 // (which a client does on its own, across separate server instances; a
 // single store here only ever serves one such process).
 type store struct {
-	stripes []*stripe
-	done    chan struct{}
+	stripes   []*stripe
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func newStore(numStripes int, gcInterval time.Duration) *store {
@@ -111,8 +112,12 @@ func (st *store) gcLoop(interval time.Duration) {
 	}
 }
 
+// close stops the GC loop. It's safe to call more than once -- a double
+// Close is an easy caller mistake (e.g. a deferred Close alongside an
+// explicit early one), and unlike a bare close(st.done) it must not panic
+// on the second call.
 func (st *store) close() {
-	close(st.done)
+	st.closeOnce.Do(func() { close(st.done) })
 }
 
 func (st *store) stripeFor(key string) *stripe {

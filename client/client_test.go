@@ -47,6 +47,171 @@ func startServer(t *testing.T, throttler deadhorse.Throttler) string {
 	return addr
 }
 
+func TestNewShardedClientPanicsOnEmptyAddrs(t *testing.T) {
+	// An empty address list used to reach shardFor's hash % len(shards) on
+	// the first Throttle call and panic with a cryptic divide-by-zero deep
+	// inside a hash function. It must instead fail loudly and clearly at
+	// construction time, where a misconfigured (e.g. empty env var) address
+	// list is actually easy to diagnose.
+	assert.PanicsWithValue(t,
+		"deadhorse: NewShardedClient requires at least one shard address",
+		func() { NewShardedClient(nil) },
+	)
+	assert.PanicsWithValue(t,
+		"deadhorse: NewShardedClient requires at least one shard address",
+		func() { NewShardedClient([]string{}) },
+	)
+}
+
+func TestShardedClientDialRespectsContextInsteadOfHanging(t *testing.T) {
+	// 192.0.2.1 is TEST-NET-1 (RFC 5737): reserved, unroutable, and -- unlike
+	// an actively refused connection -- silently dropped, so a dial to it
+	// hangs until something bounds it rather than failing back instantly.
+	// Before the fix, shardConn dialed with plain net.Dial, ignoring ctx and
+	// the client's configured timeout entirely; a dial like this would block
+	// for the OS-level TCP connect timeout (commonly tens of seconds),
+	// wedging not just this call but, because the dial ran under the
+	// shard's connection mutex, every other concurrent call to this shard
+	// too.
+	c := NewShardedClient([]string{"192.0.2.1:9"}, WithTimeout(10*time.Second))
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.Throttle(ctx, []deadhorse.RequestEntry{
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+	})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, 2*time.Second, "the dial should be bounded by ctx, not by an unbounded OS-level connect timeout")
+}
+
+func TestShardedClientConcurrentFirstCallsShareOneDial(t *testing.T) {
+	// Regression test for the ensureConn coordination that replaced dialing
+	// under the shard's mutex: many goroutines racing to Throttle on a
+	// shard that's never been connected to before must all still succeed,
+	// sharing (rather than each independently attempting) the first dial.
+	th := server.NewInMemoryThrottler(0, time.Hour)
+	defer th.Close()
+	addr := startServer(t, th)
+
+	c := NewShardedClient([]string{addr})
+	defer c.Close()
+
+	const n = 20
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{
+				{Key: fmt.Sprintf("first-dial-%d", i), Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+			})
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		assert.NoErrorf(t, err, "call %d", i)
+	}
+}
+
+func TestShardedClientThrottleAfterCloseReturnsErrClosed(t *testing.T) {
+	// Close is meant to be a definitive shutdown, like sql.DB or
+	// net.Listener -- a Throttle call afterward must not silently dial a
+	// fresh connection and keep working; it should fail clearly and
+	// immediately with net.ErrClosed.
+	th := server.NewInMemoryThrottler(0, time.Hour)
+	defer th.Close()
+	addr := startServer(t, th)
+
+	c := NewShardedClient([]string{addr})
+	// One real call first, so there's an actual established connection for
+	// Close to tear down (not just an unused, never-dialed shardConn).
+	_, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{
+		{Key: "warm-up", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+	})
+	require.NoError(t, err)
+
+	c.Close()
+
+	results, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{
+		{Key: "after-close", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, net.ErrClosed)
+	require.Len(t, results, 1)
+	assert.ErrorIs(t, results[0].Err, net.ErrClosed)
+	assert.False(t, results[0].Throttled, "fail-open (the default) should still apply to a post-Close failure")
+}
+
+func TestShardedClientCloseDoesNotBlockOnFullPendingQueue(t *testing.T) {
+	// Regression test for the backpressure wait being held under the
+	// shard's connection mutex: before the fix, Close() (which needs that
+	// same mutex) could be blocked for as long as some unrelated
+	// goroutine's own configured timeout, just because that goroutine
+	// happened to be waiting for room in a full pending queue at the time.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := lis.Addr().String()
+	t.Cleanup(func() { lis.Close() })
+
+	// Accept every connection but never respond to anything, so nothing
+	// ever leaves a shardConn's pending queue on its own.
+	go func() {
+		for {
+			conn, aerr := lis.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(c net.Conn) { <-t.Context().Done(); c.Close() }(conn)
+		}
+	}()
+
+	const callTimeout = 300 * time.Millisecond
+	c := NewShardedClient([]string{addr}, WithTimeout(callTimeout))
+
+	// Fill the shard's pending queue to maxInFlight, each bounded by a
+	// short ctx so this phase finishes quickly -- since nothing ever
+	// responds, every one of these still occupies its slot permanently
+	// even after its own call below gives up (see exchange's doc comment
+	// on what happens to an abandoned call).
+	var wg sync.WaitGroup
+	for i := 0; i < maxInFlight; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			c.Throttle(ctx, []deadhorse.RequestEntry{
+				{Key: fmt.Sprintf("filler-%d", i), Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+			})
+		}(i)
+	}
+	wg.Wait() // the queue is now permanently full; nothing will ever drain it
+
+	// One more call now has to wait for room that will never come, for up
+	// to callTimeout -- and, before the fix, would hold shardConn's mu for
+	// that entire wait.
+	go func() {
+		c.Throttle(context.Background(), []deadhorse.RequestEntry{
+			{Key: "blocked", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		})
+	}()
+	time.Sleep(50 * time.Millisecond) // give it time to actually start waiting
+
+	start := time.Now()
+	c.Close()
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, callTimeout/2, "Close must not be blocked behind another call's own backpressure wait")
+}
+
 func TestShardedClientSingleEntryRoundTrip(t *testing.T) {
 	th := server.NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()

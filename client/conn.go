@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/spiridonov/deadhorse"
 )
@@ -50,13 +51,61 @@ const idleReadTimeout = 30 * time.Second
 type shardConn struct {
 	addr string
 
-	// mu guards conn and pending, and serializes submit's write+enqueue pair
-	// (see submit) so that wire order and queue order never diverge. It is
-	// deliberately not held across any blocking network read -- only reads
-	// and writes local to establishing/tearing down a connection.
-	mu      sync.Mutex
-	conn    net.Conn
+	// mu guards conn, gen, and dialing, and serializes submit's
+	// write+enqueue pair (see submit) so that wire order and queue order
+	// never diverge. It is deliberately never held across a blocking network
+	// call -- neither a read nor, importantly, the dial itself (see
+	// ensureConn), nor waiting for room in a full pending queue (see
+	// generation): a shard that's slow to connect, or already at
+	// maxInFlight, must only stall calls actually waiting on that, not
+	// every other call to this shardConn, and must still respect each
+	// caller's own ctx/timeout rather than blocking indefinitely.
+	mu   sync.Mutex
+	conn net.Conn
+	gen  *generation
+
+	// dialing is non-nil while one goroutine is in the middle of dialing a
+	// fresh connection, and is closed (by that goroutine) once the attempt
+	// finishes, successfully or not. Any other goroutine that finds dialing
+	// already in progress waits on it instead of piling up behind mu or
+	// racing to dial a second, redundant connection.
+	dialing chan struct{}
+
+	// closed is set by close() and checked first thing in ensureConn, so
+	// that once closed, close is a definitive, permanent shutdown -- like
+	// sql.DB or net.Listener -- rather than something a later Throttle call
+	// silently undoes by dialing a fresh connection. It also closes a
+	// narrower race: without it, a dial already in flight at the time of
+	// the call could install its connection after close() returns, since
+	// mu is released across the dial itself (see ensureConn), leaking
+	// exactly the socket and reader goroutine close() was meant to tear
+	// down.
+	closed bool
+}
+
+// generation groups one physical connection's pending-call queue with the
+// semaphore that admits calls into it, so a submit blocked waiting for room
+// can wait on sem alone -- without holding shardConn's mu -- while still
+// being guaranteed that, once it holds a token, enqueuing into pending will
+// never itself block: sem starts pre-loaded with exactly maxInFlight
+// tokens, and a token only ever comes back once its call has actually left
+// pending (see readLoop and drainPending), so #tokens-held can never exceed
+// pending's remaining capacity.
+type generation struct {
 	pending chan *pendingCall
+	sem     chan struct{}
+}
+
+func newGeneration() *generation {
+	sem := make(chan struct{}, maxInFlight)
+	for i := 0; i < maxInFlight; i++ {
+		sem <- struct{}{}
+	}
+	return &generation{pending: make(chan *pendingCall, maxInFlight), sem: sem}
+}
+
+func (g *generation) release() {
+	g.sem <- struct{}{}
 }
 
 // pendingCall is one THROTTLE request waiting for its response. resultCh is
@@ -148,47 +197,117 @@ func (c *shardConn) exchange(ctx context.Context, validEntries []deadhorse.Reque
 // so the order calls are queued in always matches the order their requests
 // hit the wire -- required for the reader loop's FIFO response matching to
 // stay correct. ctx bounds how long submit will wait for room in a full
-// pending queue; it does not bound the write itself, which gets its own
-// deadline from ctx below.
+// pending queue and, via ensureConn, how long it will wait to connect; it
+// does not bound the write itself, which gets its own deadline from ctx
+// below.
 func (c *shardConn) submit(ctx context.Context, call *pendingCall, req string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	for {
+		conn, gen, err := c.ensureConn(ctx)
+		if err != nil {
+			return err
+		}
 
-	if err := c.ensureConnLocked(); err != nil {
-		return err
-	}
+		// Wait for room in gen's pending queue outside mu: a shard already
+		// at maxInFlight must only stall calls actually waiting for a slot,
+		// not every other call to this shard (see maxInFlight's doc
+		// comment). Once acquired, this token guarantees the send into
+		// gen.pending below can never itself block.
+		select {
+		case <-gen.sem:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 
-	select {
-	case c.pending <- call:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+		c.mu.Lock()
+		if c.conn != conn {
+			// A concurrent failure (or reconnect) raced us between ensureConn
+			// returning and us taking mu; this generation is no longer
+			// current, so give back the token we're holding for it (it's
+			// ours alone -- nothing else will ever use gen again) and retry
+			// against whatever the shard's connection is now.
+			c.mu.Unlock()
+			gen.release()
+			continue
+		}
 
-	if d, ok := ctx.Deadline(); ok {
-		c.conn.SetWriteDeadline(d)
-	}
-	if _, err := c.conn.Write([]byte(req)); err != nil {
-		c.failLocked(err)
-		return err
-	}
-	return nil
-}
+		gen.pending <- call
 
-// ensureConnLocked dials a fresh connection and starts its reader loop if
-// none is currently established. Caller must hold mu.
-func (c *shardConn) ensureConnLocked() error {
-	if c.conn != nil {
+		if d, ok := ctx.Deadline(); ok {
+			conn.SetWriteDeadline(d)
+		}
+		_, err = conn.Write([]byte(req))
+		c.mu.Unlock()
+		if err != nil {
+			c.abort(conn, gen, err)
+			return err
+		}
 		return nil
 	}
-	conn, err := net.Dial("tcp", c.addr)
-	if err != nil {
-		return err
+}
+
+// ensureConn returns the shard's current connection and generation,
+// dialing a fresh one if none is established. Unlike dialing under mu, at
+// most one goroutine ever has a real net.Dialer.DialContext call in flight
+// for this shardConn at a time -- others racing to connect the same shard
+// wait on that attempt (bounded by their own ctx) instead of blocking every
+// other call to this shard for however long the OS-level connect takes, or
+// each independently dialing a redundant connection.
+func (c *shardConn) ensureConn(ctx context.Context) (net.Conn, *generation, error) {
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return nil, nil, net.ErrClosed
+		}
+		if c.conn != nil {
+			conn, gen := c.conn, c.gen
+			c.mu.Unlock()
+			return conn, gen, nil
+		}
+		if dialing := c.dialing; dialing != nil {
+			c.mu.Unlock()
+			select {
+			case <-dialing:
+				continue // re-check c.conn now that the other dial finished
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+
+		dialing := make(chan struct{})
+		c.dialing = dialing
+		c.mu.Unlock()
+
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", c.addr)
+
+		c.mu.Lock()
+		c.dialing = nil
+		switch {
+		case err != nil:
+			// Nothing dialed; nothing to install.
+		case c.closed:
+			// close() ran while the dial above was in flight -- leave the
+			// shardConn's state alone and close the connection we just
+			// opened instead of resurrecting it after Close().
+			err = net.ErrClosed
+		default:
+			gen := newGeneration()
+			c.conn = conn
+			c.gen = gen
+			go c.readLoop(conn, gen)
+		}
+		resultConn, resultGen := c.conn, c.gen
+		close(dialing)
+		c.mu.Unlock()
+
+		if err != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			return nil, nil, err
+		}
+		return resultConn, resultGen, nil
 	}
-	pending := make(chan *pendingCall, maxInFlight)
-	c.conn = conn
-	c.pending = pending
-	go c.readLoop(conn, pending)
-	return nil
 }
 
 // readLoop owns conn's read side for its entire lifetime: it reads one
@@ -197,69 +316,56 @@ func (c *shardConn) ensureConnLocked() error {
 // order. Any read or decode error desyncs that ordering for good, so it
 // takes the whole connection down with it via abort rather than trying to
 // recover.
-func (c *shardConn) readLoop(conn net.Conn, pending chan *pendingCall) {
+func (c *shardConn) readLoop(conn net.Conn, gen *generation) {
 	r := bufio.NewReader(conn)
 	for {
 		conn.SetReadDeadline(time.Now().Add(idleReadTimeout))
 		line, err := r.ReadString('\n')
 		if err != nil {
-			c.abort(conn, pending, err)
+			c.abort(conn, gen, err)
 			return
 		}
 
 		var call *pendingCall
 		select {
-		case call = <-pending:
+		case call = <-gen.pending:
+			gen.release()
 		default:
-			c.abort(conn, pending, fmt.Errorf("deadhorse: response with nothing pending: %q", strings.TrimRight(line, "\r\n")))
+			c.abort(conn, gen, fmt.Errorf("deadhorse: response with nothing pending: %q", strings.TrimRight(line, "\r\n")))
 			return
 		}
 
 		results, err := decodeResult(line, call.entries)
 		call.resultCh <- pendingResult{results: results, err: err}
 		if err != nil {
-			c.abort(conn, pending, err)
+			c.abort(conn, gen, err)
 			return
 		}
 	}
 }
 
-// abort tears down conn and fails every call still waiting in pending with
-// err. It's called from the reader loop itself (outside mu, since it must
-// never block a concurrent submit on a network read), and only clears
-// shardConn's own conn/pending fields if they still refer to this exact
+// abort tears down conn and fails every call still waiting in gen.pending
+// with err. It's called from the reader loop itself (outside mu, since it
+// must never block a concurrent submit on a network read), and only clears
+// shardConn's own conn/gen fields if they still refer to this exact
 // generation -- a concurrent submit may already have reconnected.
-func (c *shardConn) abort(conn net.Conn, pending chan *pendingCall, err error) {
+func (c *shardConn) abort(conn net.Conn, gen *generation, err error) {
 	c.mu.Lock()
 	if c.conn == conn {
 		c.conn = nil
-		c.pending = nil
+		c.gen = nil
 	}
 	c.mu.Unlock()
 
 	conn.Close()
-	drainPending(pending, err)
+	drainPending(gen, err)
 }
 
-// failLocked is abort's counterpart for a write failure inside submit, where
-// mu is already held. It's safe to close and drain right here, without
-// releasing mu first: nothing else can observe or touch this generation's
-// conn/pending until submit returns.
-func (c *shardConn) failLocked(err error) {
-	conn := c.conn
-	pending := c.pending
-	c.conn = nil
-	c.pending = nil
-	if conn != nil {
-		conn.Close()
-	}
-	drainPending(pending, err)
-}
-
-func drainPending(pending chan *pendingCall, err error) {
+func drainPending(gen *generation, err error) {
 	for {
 		select {
-		case call := <-pending:
+		case call := <-gen.pending:
+			gen.release()
 			call.resultCh <- pendingResult{err: err}
 		default:
 			return
@@ -271,7 +377,8 @@ func (c *shardConn) close() {
 	c.mu.Lock()
 	conn := c.conn
 	c.conn = nil
-	c.pending = nil
+	c.gen = nil
+	c.closed = true
 	c.mu.Unlock()
 
 	if conn != nil {
@@ -280,10 +387,22 @@ func (c *shardConn) close() {
 }
 
 func validateKey(key string) error {
-	if key == "" || strings.ContainsAny(key, " \t\r\n|") {
-		return fmt.Errorf("deadhorse: key %q is empty or contains a space/'|', which DHP/1 forbids: %w", key, ErrInvalidKey)
+	if key == "" || strings.ContainsFunc(key, isKeyDelimiter) {
+		return fmt.Errorf("deadhorse: key %q is empty or contains whitespace/'|', which DHP/1 forbids: %w", key, ErrInvalidKey)
 	}
 	return nil
+}
+
+// isKeyDelimiter reports whether r is a rune the wire protocol's own
+// tokenizers -- strings.Fields, used by both the server (textserver.go's
+// dispatch/handleThrottle) and this package's own response parser
+// (decodeResult) -- treat as a delimiter: any Unicode whitespace, or '|'.
+// validateKey must reject exactly this set, not a narrower ASCII-only
+// blacklist: a key containing e.g. '\v' would otherwise pass validation
+// here only to get split into two wire tokens later, desyncing the whole
+// batch (see decodeResult's entry-count check).
+func isKeyDelimiter(r rune) bool {
+	return unicode.IsSpace(r) || r == '|'
 }
 
 // encodeThrottle assumes every entry has already passed validateKey.

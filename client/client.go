@@ -57,7 +57,16 @@ func WithFailClosed() Option {
 
 // NewShardedClient builds a client over a static list of shard addresses
 // (host:port). Connections are opened lazily, on first use per shard.
+//
+// NewShardedClient panics if addrs is empty: shardFor's hash-modulo routing
+// has no shard to route to, so an empty list is a caller configuration bug
+// (e.g. an unset/empty address flag or environment variable) that's far
+// clearer to catch here than as a divide-by-zero panic deep inside the first
+// Throttle call.
 func NewShardedClient(addrs []string, opts ...Option) *ShardedClient {
+	if len(addrs) == 0 {
+		panic("deadhorse: NewShardedClient requires at least one shard address")
+	}
 	c := &ShardedClient{
 		shards:   make([]*shardConn, len(addrs)),
 		timeout:  defaultTimeout,

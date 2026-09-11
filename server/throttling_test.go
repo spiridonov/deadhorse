@@ -189,6 +189,21 @@ func TestInMemoryThrottlerRespectsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := th.Throttle(ctx, []deadhorse.RequestEntry{{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}})
+	entries := []deadhorse.RequestEntry{
+		{Key: "k1", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k2", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+	}
+	results, err := th.Throttle(ctx, entries)
 	assert.ErrorIs(t, err, context.Canceled)
+
+	// The Throttler interface promises a result slice the same length as
+	// entries, in the same order, even when the call-level error is
+	// non-nil -- a caller that indexes results[i] regardless of err must
+	// not see a nil slice here.
+	require.Len(t, results, len(entries))
+	for i, r := range results {
+		assert.Equalf(t, entries[i].Key, r.Key, "result %d", i)
+		assert.Truef(t, r.Throttled, "result %d: an unevaluated entry should fail closed", i)
+		assert.ErrorIsf(t, r.Err, context.Canceled, "result %d", i)
+	}
 }

@@ -14,9 +14,12 @@ import (
 // InMemoryThrottler is a leaky-bucket (GCRA) rate limiter over a striped,
 // self-expiring in-memory store. It holds no configuration of its own --
 // every call carries its own capacity and rate -- and no key survives longer
-// than about 1-2 GC intervals past its last touch. Throttle never returns a
-// non-nil error: the GCRA check itself can't fail (a nonsensical limit just
-// fails closed, see gcraCheck), so ResponseEntry.Err is always nil too.
+// than about 1-2 GC intervals past its last touch. The GCRA check itself
+// can't fail (a nonsensical limit just fails closed, see gcraCheck); the
+// only way Throttle returns a non-nil error is ctx already being done when
+// the call starts, in which case every entry is reported as throttled with
+// Err set to ctx.Err() -- see the Throttler interface's result-slice
+// contract, which this always honors.
 type InMemoryThrottler struct {
 	store *store
 }
@@ -32,7 +35,15 @@ func NewInMemoryThrottler(numStripes int, gcInterval time.Duration) *InMemoryThr
 
 func (t *InMemoryThrottler) Throttle(ctx context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		// Not evaluated at all -- fail closed (Throttled: true), the safer
+		// default when there's no real answer to report, and still a
+		// same-length, same-order result slice per the Throttler interface's
+		// contract rather than a bare nil.
+		result := make([]deadhorse.ResponseEntry, len(entries))
+		for i, e := range entries {
+			result[i] = deadhorse.ResponseEntry{Key: e.Key, Throttled: true, Err: err}
+		}
+		return result, err
 	}
 
 	now := time.Now().UnixNano()

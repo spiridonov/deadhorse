@@ -12,7 +12,7 @@ client for in any language with nothing more than a socket and a few string oper
 ```
 $ nc localhost 9000
 THROTTLE user:42:writes|100|10000000|1|R
-RESULT user:42:writes|0|99|0
+RESULT user:42:writes|0|100|0
 ```
 
 ## Why it's built this way
@@ -126,8 +126,11 @@ key|capacity|emission_interval_ns|cost|mode
 key|throttled|remaining|retry_after_ns
 ```
 
-`throttled` is `0` or `1`; `remaining` is the bucket's current headroom in cost units; `retry_after_ns`
-is how many nanoseconds until the request would have fit (`0` if it wasn't throttled). One
+`throttled` is `0` or `1`; `remaining` is the bucket's headroom in cost units *as of just before
+this request* — not affected by this request's own cost or outcome, so a request that itself gets
+admitted (or throttled) still reports the same `remaining` a peek at that same instant would have;
+`retry_after_ns` is how many nanoseconds until the request would have fit (`0` if it wasn't
+throttled). One
 `THROTTLE` line can carry several entries at once — handy when one logical call needs to check more
 than one limit (a per-user limit and a per-org limit, say) in a single round trip. There's no count
 field anywhere in the grammar: entries and results are just whatever whitespace-separated tokens
@@ -165,6 +168,7 @@ deadhorse
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `-host` | (all interfaces) | DHP/1 text protocol listen host |
 | `-port` | 9000 | DHP/1 text protocol port |
 | `-prometheus-port` | 9090 | Serves `/metrics` (Go runtime/process stats, even with no application metrics registered) |
 | `-stripes` | 256 | Concurrency stripes in the in-memory store |

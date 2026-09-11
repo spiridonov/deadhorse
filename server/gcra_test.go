@@ -1,6 +1,7 @@
 package server
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -53,14 +54,33 @@ func TestGcraCheckBurstThenThrottle(t *testing.T) {
 }
 
 func TestGcraCheckRetryAfterAccountsForCost(t *testing.T) {
-	// A bucket that's already full asked for 3 units at once needs 3
+	// A bucket that's already full asked for 3 units at once (still within
+	// capacity, so genuinely satisfiable once enough has drained) needs 3
 	// emission intervals of room, so retryAfterNs should scale with cost.
-	const capacity, emissionInterval = 1, 1000
+	const capacity, emissionInterval = 5, 1000
 
-	_, _, _, tat := gcraCheck(0, 0, capacity, emissionInterval, 1) // fill the bucket
+	_, _, _, tat := gcraCheck(0, 0, capacity, emissionInterval, capacity) // fill the bucket completely
 	throttled, _, retryAfterNs, _ := gcraCheck(tat, 0, capacity, emissionInterval, 3)
 	require.True(t, throttled)
 	assert.EqualValues(t, 3*emissionInterval, retryAfterNs)
+}
+
+func TestGcraCheckCostExceedingCapacityIsPermanentlyUnsatisfiable(t *testing.T) {
+	// A single request whose cost exceeds the bucket's capacity can never
+	// be admitted, no matter how long the caller waits: RetryAfter must
+	// signal "don't bother retrying" (0), not a positive-looking value
+	// that never actually resolves.
+	const capacity, emissionInterval = 1, 1000
+
+	throttled, _, retryAfterNs, tat := gcraCheck(0, 0, capacity, emissionInterval, 5)
+	require.True(t, throttled)
+	assert.Zero(t, retryAfterNs, "an unsatisfiable request must not report a misleading RetryAfter")
+
+	// Waiting an arbitrary amount of time and retrying changes nothing:
+	// still throttled, still RetryAfter=0.
+	throttled, _, retryAfterNs, _ = gcraCheck(tat, 1_000_000, capacity, emissionInterval, 5)
+	require.True(t, throttled)
+	assert.Zero(t, retryAfterNs)
 }
 
 func TestGcraCheckRemainingReflectsCurrentLevelNotThisRequest(t *testing.T) {
@@ -104,6 +124,62 @@ func TestGcraCheckZeroOrNegativeEmissionIntervalFailsClosed(t *testing.T) {
 		assert.Zerof(t, retryAfterNs, "emissionInterval=%d", ei)
 		assert.Zerof(t, admittedTAT, "emissionInterval=%d: tat should be left unchanged", ei)
 	}
+}
+
+func TestGcraCheckOverflowingCostFailsClosedInsteadOfWrapping(t *testing.T) {
+	// cost*emissionInterval overflows int64 here (2^62 * 4 wraps to 0 mod
+	// 2^64) -- if gcraCheck let that wrap silently through, the request
+	// would look like it cost nothing and get admitted for free instead of
+	// being throttled. Both capacity and cost arrive over the wire with no
+	// upper bound (see textserver.parseEntry), so this is reachable from a
+	// crafted request, not just a theoretical edge case.
+	const capacity, emissionInterval = 1, 4
+	const hugeCost = int64(1) << 62
+
+	throttled, remaining, retryAfterNs, admittedTAT := gcraCheck(0, 1000, capacity, emissionInterval, hugeCost)
+	assert.True(t, throttled, "an overflowing cost must fail closed, not bypass throttling")
+	assert.Zero(t, remaining)
+	assert.Zero(t, retryAfterNs)
+	assert.EqualValues(t, 0, admittedTAT, "TAT must be left unchanged, not silently advanced")
+}
+
+func TestGcraCheckOverflowingCapacityFailsClosed(t *testing.T) {
+	// capacity*emissionInterval overflows int64 here for the same reason as
+	// the cost case above.
+	const emissionInterval = 1 << 40
+	const hugeCapacity = int64(1) << 40
+
+	throttled, remaining, retryAfterNs, admittedTAT := gcraCheck(0, 1000, hugeCapacity, emissionInterval, 1)
+	assert.True(t, throttled, "an overflowing capacity*emissionInterval must fail closed")
+	assert.Zero(t, remaining)
+	assert.Zero(t, retryAfterNs)
+	assert.EqualValues(t, 0, admittedTAT)
+}
+
+func TestGcraCheckNegativeCapacityOrCostFailsClosed(t *testing.T) {
+	// Neither should reach gcraCheck in practice (textserver.parseEntry and
+	// EffectiveCost both reject/normalize negatives upstream), but gcraCheck
+	// itself must still refuse rather than let a negative operand skew the
+	// arithmetic, same as it does for a non-sane emissionInterval.
+	throttled, remaining, retryAfterNs, admittedTAT := gcraCheck(0, 1000, -1, 1000, 1)
+	assert.True(t, throttled, "negative capacity must fail closed")
+	assert.Zero(t, remaining)
+	assert.Zero(t, retryAfterNs)
+	assert.EqualValues(t, 0, admittedTAT)
+
+	throttled, remaining, retryAfterNs, admittedTAT = gcraCheck(0, 1000, 10, 1000, -1)
+	assert.True(t, throttled, "negative cost must fail closed")
+	assert.Zero(t, remaining)
+	assert.Zero(t, retryAfterNs)
+	assert.EqualValues(t, 0, admittedTAT)
+}
+
+func TestCeilDivNearMaxInt64DoesNotOverflow(t *testing.T) {
+	// The naive (a + b - 1) / b formulation overflows here: a+b-1 exceeds
+	// math.MaxInt64 and wraps negative. The fixed formulation must not.
+	got := ceilDiv(math.MaxInt64-2, 1000)
+	assert.EqualValues(t, 9223372036854776, got)
+	assert.Positive(t, got, "must not wrap negative on overflow")
 }
 
 func TestGcraCheckRejectionDoesNotAdvanceTAT(t *testing.T) {

@@ -243,9 +243,6 @@ func runWorker(runCtx context.Context, c *client.ShardedClient, limit deadhorse.
 		ctx, cancel := context.WithTimeout(runCtx, timeout)
 		start := time.Now()
 		resp, err := c.Throttle(ctx, []deadhorse.RequestEntry{entry})
-		// if err != nil {
-		// 	fmt.Printf("%v", err)
-		// }
 		elapsed := time.Since(start)
 		cancel()
 
