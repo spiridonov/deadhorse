@@ -81,6 +81,19 @@ no rebalancing to orchestrate.
 static list of shard addresses, plain modulo hashing, and per-shard connections managed
 independently.
 
+A shard is also a transaction boundary (see [DHP/1](#deadhorse-protocol-reference-dhp1)):
+`client.ShardedClient.Throttle(ctx, shardKey, entries)` treats one call as one transaction. 
+`shardKey` -- hashed to pick which shard the whole call goes to -- is what a caller uses to
+control that: every entry passed to one call is sent together as a single line, and every `R`
+entry among them commits as one all-or-none group. To batch several independent checks in one call
+the way you always could, just pass any one of their keys (or anything else) as `shardKey` -- it
+only matters when it's shared. To force two checks that *must* be decided together onto the same
+shard and the same transaction -- a per-org and a per-user check for the same request, say -- give
+that one call a `shardKey` of your choosing (a tenant ID, typically) and send both
+entries in it. `shardKey` is specific to `ShardedClient`: `server.InMemoryThrottler` (and therefore
+a bare `TextServer`) has only one shard, itself, so its own `Throttle` takes no such argument --
+every call to it is already the transaction (see [DHP/1](#deadhorse-protocol-reference-dhp1)).
+
 ## Garbage collection
 
 A server's entire state is a striped map from key to a single `int64` (that TAT value above).
@@ -141,16 +154,25 @@ If one entry in a batch is malformed, its result is the token `ERR` and every ot
 same batch is still answered normally — a `THROTTLE` line never fails outright. Only `QUIT` and a
 line that exceeds the configured maximum length end a connection.
 
+**A line is a transaction for its `R` entries.** Every `R` entry on one line is evaluated first,
+against a private copy of each bucket it touches, without writing anything; only if every one of
+them individually admits does the whole line commit, all at once — if even one would be throttled,
+none of them are, and every `R` entry reports `throttled=1`, including ones whose own bucket had
+plenty of room. `P` entries are entirely unaffected either way: each is still evaluated and
+reported on its own, exactly as if it were the only entry on the line.
+
 A worked example, batching a per-org and a per-user check in one round trip:
 
 ```
 > THROTTLE org:acme:writes|100|10000000|1|R user:42:writes|20|50000000|1|R
-< RESULT org:acme:writes|0|63|0 user:42:writes|1|0|12000000
+< RESULT org:acme:writes|1|63|0 user:42:writes|1|0|12000000
 ```
 
-The org-level check passed (63 units of headroom left); the user-level check for the same call did
-not. DeadHorse has no opinion on how a caller combines several results from one batch — that's
-entirely up to the caller.
+The user-level check failed, so the line is denied as a whole: the org-level check reports
+`throttled=1` too, even though its own bucket had 63 units of headroom to spare (`remaining` and
+`retry_after_ns` still reflect that unused headroom — only `throttled` reflects the line's actual,
+all-or-none outcome). Neither bucket's state changed. DeadHorse has no opinion on how a caller
+combines several results from one line beyond this — that's entirely up to the caller.
 
 `HELLO` exists for protocol/version negotiation; a client that skips it entirely is assumed to
 speak version `1`. DeadHorse has no authentication or encryption of its own — treat it the way
@@ -194,13 +216,17 @@ import (
 c := client.NewShardedClient([]string{"shard-0:9000", "shard-1:9000"})
 defer c.Close()
 
-results, err := c.Throttle(ctx, []deadhorse.RequestEntry{
+results, err := c.Throttle(ctx, "user:42:writes", []deadhorse.RequestEntry{
     {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}},
 })
 if results[0].Throttled {
     // reject the request; results[0].RetryAfter says how long until it would fit
 }
 ```
+
+The `shardKey` argument (here, just the one entry's own `Key`) is what `ShardedClient` hashes to
+pick a shard for the whole call -- see [Sharding](#sharding) for using it to force several entries
+onto one shard, and therefore one all-or-none transaction.
 
 `Peek` defaults to `false`, so a `RequestEntry` that forgets to set it still actually enforces the
 limit rather than silently becoming a no-op. `ShardedClient` fails **open** by default: if a shard
@@ -233,9 +259,12 @@ results, err := throttler.Throttle(ctx, []deadhorse.RequestEntry{
 })
 ```
 
-`InMemoryThrottler` implements the same `deadhorse.Throttler` interface `TextServer` is built on
-(and never returns a non-nil error itself -- a nonsensical limit just fails closed), so code written
-against it works unchanged whether the limiter lives in-process or behind the network protocol.
+Unlike `client.ShardedClient.Throttle`, there's no `shardKey` here: `InMemoryThrottler` never
+shards, so there's nothing to route -- every call to it is already the whole transaction (see
+[DHP/1](#deadhorse-protocol-reference-dhp1)). `InMemoryThrottler` implements `server.Throttler`,
+the same interface `TextServer` is built on (and never returns a non-nil error itself -- a
+nonsensical limit just fails closed), so code written against it works unchanged whether the
+limiter lives in-process or behind the network protocol.
 
 
 ## License

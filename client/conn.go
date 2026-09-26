@@ -26,6 +26,13 @@ var ErrInvalidKey = errors.New("deadhorse: invalid key")
 // (a bad field on the wire), so there's no computed decision to trust.
 var ErrEntryRejected = errors.New("deadhorse: entry rejected by server")
 
+// ErrCircuitOpen is wrapped into a ResponseEntry.Err when a shard's circuit
+// breaker is open: the call was failed immediately, without any network
+// activity, because that shard has recently shown enough consecutive
+// failures that another attempt right now is far more likely to waste a
+// full timeout than to get a real answer. See circuitBreaker.
+var ErrCircuitOpen = errors.New("deadhorse: shard circuit open, failing fast without contacting it")
+
 // maxInFlight bounds how many THROTTLE calls a single shardConn will pipeline
 // onto its connection at once. A call beyond this simply waits its turn to
 // submit -- backpressure against a shard that's accepting writes faster than
@@ -50,6 +57,13 @@ const idleReadTimeout = 30 * time.Second
 // matched back to calls by plain FIFO order instead of a request ID.
 type shardConn struct {
 	addr string
+
+	// breaker fails calls to this shard fast, without any network activity,
+	// once it's shown enough consecutive shard-attributable failures in a
+	// row -- see circuitBreaker's doc comment. It has its own internal
+	// synchronization (atomics, not mu) and is read/updated from throttle
+	// and exchange without ever touching mu.
+	breaker *circuitBreaker
 
 	// mu guards conn, gen, and dialing, and serializes submit's
 	// write+enqueue pair (see submit) so that wire order and queue order
@@ -146,7 +160,22 @@ func (c *shardConn) throttle(ctx context.Context, entries []deadhorse.RequestEnt
 		return results, errors.Join(errs...)
 	}
 
-	if err := c.exchange(ctx, validEntries, timeout, results, validIdx); err != nil {
+	if !c.breaker.allow() {
+		err := fmt.Errorf("deadhorse: shard %s: %w", c.addr, ErrCircuitOpen)
+		for _, idx := range validIdx {
+			results[idx] = deadhorse.ResponseEntry{Key: entries[idx].Key, Throttled: !failOpen, Err: err}
+		}
+		return results, errors.Join(append(errs, err)...)
+	}
+
+	shardFault, err := c.exchange(ctx, validEntries, timeout, results, validIdx)
+	switch {
+	case err != nil && shardFault:
+		c.breaker.recordFailure()
+	case err == nil:
+		c.breaker.recordSuccess()
+	}
+	if err != nil {
 		for _, idx := range validIdx {
 			results[idx] = deadhorse.ResponseEntry{Key: entries[idx].Key, Throttled: !failOpen, Err: err}
 		}
@@ -160,36 +189,58 @@ func (c *shardConn) throttle(ctx context.Context, entries []deadhorse.RequestEnt
 // wait -- see submit and shardConn's pipelining doc comment. It returns only
 // a network/protocol-level error -- never a per-entry one, since a per-entry
 // ERR is not an exchange failure (see decodeResult).
-func (c *shardConn) exchange(ctx context.Context, validEntries []deadhorse.RequestEntry, timeout time.Duration, results []deadhorse.ResponseEntry, validIdx []int) error {
+//
+// The shardFault return says whether a non-nil err reflects something
+// actually wrong with this shard (a dial/write/read failure, a desynced
+// connection, or this client's own configured timeout expiring before the
+// shard answered) as opposed to the caller's own ctx ending first (its
+// deadline passing, or an explicit cancel) -- which says nothing about the
+// shard's health and must never be allowed to trip its circuit breaker: a
+// caller with a tighter budget than this client's configured timeout must
+// not be able to fail every other caller's calls to this shard too, just by
+// giving up early itself. The two are told apart by checking ctx -- the
+// caller's own context, not the deadline-bound waitCtx derived from it below
+// -- immediately after any failure: if ctx is already done, the caller is
+// why this call ended; if it isn't, this call's own end (a real network
+// failure, or this client's own timeout) is what happened, which is exactly
+// the shard-attributable case. That check is only reliable because of how
+// waitCtx itself is constructed below: when ctx's own deadline already
+// binds at least as tightly as timeout would, waitCtx is ctx itself, not a
+// second context.WithDeadline wrapped around it for the very same instant
+// -- two independent timers racing to fire at the same instant would leave
+// which one's Err() is visible first up to chance, undermining the whole
+// distinction.
+func (c *shardConn) exchange(ctx context.Context, validEntries []deadhorse.RequestEntry, timeout time.Duration, results []deadhorse.ResponseEntry, validIdx []int) (shardFault bool, err error) {
 	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
+	waitCtx := ctx
+	if d, ok := ctx.Deadline(); !ok || d.After(deadline) {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
-	waitCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
 
 	call := &pendingCall{entries: validEntries, resultCh: make(chan pendingResult, 1)}
 	req := encodeThrottle(validEntries)
 
 	if err := c.submit(waitCtx, call, req); err != nil {
-		return err
+		return ctx.Err() == nil, err
 	}
 
 	select {
 	case res := <-call.resultCh:
 		if res.err != nil {
-			return res.err
+			return true, res.err
 		}
 		for j, idx := range validIdx {
 			results[idx] = res.results[j]
 		}
-		return nil
+		return false, nil
 	case <-waitCtx.Done():
 		// call's response, if the shard eventually sends one, is still read
 		// by the connection's reader loop and simply dropped into resultCh's
 		// one-slot buffer unread -- the connection itself is left alone for
 		// every other call still pipelined on it.
-		return waitCtx.Err()
+		return ctx.Err() == nil, waitCtx.Err()
 	}
 }
 

@@ -1,13 +1,14 @@
-// Package deadhorse defines the shared vocabulary between a DeadHorse
-// server and its clients: the request/response shapes and the Throttler
-// interface they're built around. It has no dependency beyond the standard
-// library and no opinion on how a Throttle call is actually carried out --
-// see the server subpackage for the in-memory engine and DHP/1 server, and
-// the client subpackage for the sharded network client.
+// Package deadhorse defines the shared request/response vocabulary between
+// a DeadHorse server and its clients -- RequestEntry, ResponseEntry, and
+// Limit. It has no dependency beyond the standard library and no opinion on
+// how a Throttle call is actually carried out -- see the server subpackage
+// for the in-memory engine and DHP/1 server (InMemoryThrottler.Throttle,
+// and server.Throttler for what it takes to plug something else into
+// TextServer), and the client subpackage for the sharded network client
+// (ShardedClient.Throttle).
 package deadhorse
 
 import (
-	"context"
 	"time"
 )
 
@@ -32,13 +33,27 @@ type RequestEntry struct {
 	// bucket. The zero value (false) is the safe default: an entry that
 	// forgets to set this still actually enforces its limit, rather than
 	// silently never doing anything.
+	//
+	// A Peek entry is also exempt from the all-or-none transaction one
+	// Throttle call forms for its other entries (see
+	// server.InMemoryThrottler.Throttle): it's evaluated and reported
+	// entirely on its own, and neither gates nor is gated by whatever
+	// non-Peek entries share its call.
 	Peek bool
 }
 
 // ResponseEntry is the outcome of one RequestEntry, always returned in the
 // same order and at the same index as its request.
 type ResponseEntry struct {
-	Key       string
+	Key string
+	// Throttled reports whether this request was denied. Its own meaning is
+	// unchanged by the all-or-none transaction one Throttle call forms for
+	// its non-Peek entries (see server.InMemoryThrottler.Throttle): it
+	// still just says whether this request was admitted. What can change
+	// is the reason -- a non-Peek entry can come back Throttled even
+	// though its own bucket had room, if another non-Peek entry sharing
+	// its call was denied; nothing about this field's shape or the wire
+	// format changes to reflect that.
 	Throttled bool
 	// Remaining is the bucket's headroom in cost units as of just before
 	// this request, clamped to [0, Limit.Capacity] -- not affected by this
@@ -63,21 +78,12 @@ type ResponseEntry struct {
 }
 
 // EffectiveCost normalizes a request's cost: zero/negative means "not
-// specified," which defaults to 1. Every Throttler implementation and the
-// DHP/1 wire client apply this so an omitted cost means the same thing
+// specified," which defaults to 1. Both InMemoryThrottler and the DHP/1
+// wire client apply this so an omitted cost means the same thing
 // everywhere.
 func EffectiveCost(cost int64) int64 {
 	if cost <= 0 {
 		return 1
 	}
 	return cost
-}
-
-// Throttler evaluates a batch of leaky-bucket checks. Implementations
-// always return a result slice the same length as entries, in the same
-// order, even when the returned error is non-nil -- a call-level error
-// means something went wrong for some subset of entries, not that nothing
-// can be reported; see ResponseEntry.Err for which ones and why.
-type Throttler interface {
-	Throttle(ctx context.Context, entries []RequestEntry) ([]ResponseEntry, error)
 }

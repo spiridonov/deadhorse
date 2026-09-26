@@ -228,7 +228,7 @@ func TestHandleThrottleMismatchedResponseLengthDoesNotSinkWholeBatch(t *testing.
 // bind here (rather than letting ListenAndServe pick a port and racing to
 // discover it) keeps the test deterministic; ListenAndServe/Close get their
 // own dedicated test below.
-func startTestServer(t *testing.T, throttler deadhorse.Throttler) string {
+func startTestServer(t *testing.T, throttler Throttler) string {
 	t.Helper()
 	srv := NewTextServer(throttler, 0)
 	return startTextServerListener(t, srv)
@@ -400,6 +400,35 @@ func TestTextServerThrottleBatchMultipleKeys(t *testing.T) {
 
 	got := client.sendRecv("THROTTLE tenant-a|1|1000|1|R tenant-b|1|1000|1|R")
 	assert.Equal(t, "RESULT tenant-a|0|1|0 tenant-b|0|1|0", got)
+}
+
+func TestTextServerThrottleBatchAllOrNone(t *testing.T) {
+	// Mirrors the README's worked example: a per-org and a per-user check
+	// on one line. Exhaust the user-level bucket first, then send both
+	// together -- since they now share a line, the org check (which has
+	// plenty of headroom on its own) must be denied too.
+	th := NewInMemoryThrottler(0, time.Hour)
+	defer th.Close()
+	addr := startTestServer(t, th)
+	client := dialTestServer(t, addr)
+
+	const hourNS = "3600000000000" // 1h emission interval, comfortably longer than this test takes to run
+
+	got := client.sendRecv("THROTTLE user:42:writes|1|" + hourNS + "|1|R")
+	assert.Equal(t, "RESULT user:42:writes|0|1|0", got, "warm-up: exhaust the user-level bucket on its own")
+
+	got = client.sendRecv("THROTTLE org:acme:writes|100|" + hourNS + "|1|R user:42:writes|1|" + hourNS + "|1|R")
+	// user's retry_after is "just under an hour" (some of the interval
+	// already drained by wall-clock time since the warm-up call above), so
+	// match it as a pattern rather than pin the exact nanosecond count --
+	// the point under test is that org's result flips to throttled too,
+	// with its own remaining/retry_after (100, 0) otherwise unchanged.
+	assert.Regexp(t, `^RESULT org:acme:writes\|1\|100\|0 user:42:writes\|1\|0\|\d+$`, got,
+		"the whole line is denied because the user-level check is: org's own remaining/retry_after are unchanged, only its throttled bit flips")
+
+	// The org bucket must not have been touched by the denied line.
+	got = client.sendRecv("THROTTLE org:acme:writes|100|" + hourNS + "|1|R")
+	assert.Equal(t, "RESULT org:acme:writes|0|100|0", got, "org's bucket should still be fresh: the earlier line never committed")
 }
 
 func TestTextServerThrottleMalformedEntryMidBatch(t *testing.T) {

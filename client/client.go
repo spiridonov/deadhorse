@@ -1,15 +1,12 @@
 // Package client is a DHP/1 client for DeadHorse.
 //
-// A ShardedClient holds a static list of shard addresses and, for every key,
-// picks exactly one shard by hashing the key -- no discovery, no
-// rebalancing, no coordination with the servers at all. It implements
-// deadhorse.Throttler, so it's a drop-in Throttler wherever one is expected.
+// A ShardedClient holds a static list of shard addresses and, for every
+// Throttle call, picks exactly one shard by hashing that call's shardKey --
+// no discovery, no rebalancing, no coordination with the servers at all.
 package client
 
 import (
 	"context"
-	"errors"
-	"sync"
 	"time"
 
 	"github.com/spiridonov/deadhorse"
@@ -17,21 +14,46 @@ import (
 
 const defaultTimeout = 10 * time.Millisecond
 
-// ShardedClient routes each key to shard hash(key) % len(addrs), a static
-// list configured at construction time. This is deliberately plain modulo
-// hashing rather than consistent hashing: remapping a key when the shard
-// count changes just resets that key's bucket on its new shard (one extra
-// burst of unthrottled traffic, once), which is cheap enough here that the
-// simpler scheme is the right default. Switch to a consistent-hashing
-// variant instead if the shard count changes often enough that even brief
-// under-enforcement during a resize is a problem.
+// ShardedClient routes every Throttle call, as a whole, to shard
+// hash(shardKey) % len(addrs) -- a static list configured at construction
+// time. This is deliberately plain modulo hashing rather than consistent
+// hashing: remapping a key when the shard count changes just resets that
+// key's bucket on its new shard (one extra burst of unthrottled traffic,
+// once), which is cheap enough here that the simpler scheme is the right
+// default. Switch to a consistent-hashing variant instead if the shard
+// count changes often enough that even brief under-enforcement during a
+// resize is a problem.
+//
+// One call is one shard, and therefore one DHP/1 line: every entry passed
+// to a single Throttle call is sent together, and the server commits every
+// non-Peek one of them as a single all-or-none group (see
+// server.InMemoryThrottler.Throttle for exactly how). This is exactly what
+// makes shardKey the caller's tool for controlling that grouping: giving
+// two calls' worth of entries the same shardKey and sending them as one
+// Throttle call forces them onto the same shard and the same transaction;
+// entries that don't need to be decided together belong in separate calls
+// (each shardKey can simply be that entry's own Key, matching plain
+// per-key routing). Two concurrent Throttle calls never share a line just
+// because they hash to the same shard -- each becomes its own line,
+// pipelined independently over that shard's connection.
+//
+// Each shard also carries its own circuit breaker (see circuitBreaker):
+// since a shardConn has no memory of a shard's health between calls, a
+// shard that's dead or black-holing traffic would otherwise cost every
+// caller its full configured timeout, on every single call, forever. Once
+// a shard has failed enough consecutive calls in a row, its breaker opens
+// and further calls to it fail immediately instead of paying that cost,
+// until a periodic trial call finds it healthy again. Tune with
+// WithBreaker, or disable it entirely if that's not the right tradeoff for
+// a given deployment.
 type ShardedClient struct {
 	shards   []*shardConn
 	timeout  time.Duration
 	failOpen bool
-}
 
-var _ deadhorse.Throttler = &ShardedClient{}
+	breakerFailureThreshold int64
+	breakerOpenDuration     time.Duration
+}
 
 type Option func(*ShardedClient)
 
@@ -55,6 +77,26 @@ func WithFailClosed() Option {
 	return func(c *ShardedClient) { c.failOpen = false }
 }
 
+// WithBreaker overrides a shard's circuit breaker defaults (see
+// circuitBreaker): after failureThreshold consecutive failures
+// attributable to that shard -- a dial/write/read failure, or this
+// client's own configured timeout expiring before the shard answered, but
+// never a failure that was actually the caller's own ctx giving up first --
+// the shard's breaker opens and every call to it fails immediately, with no
+// network activity at all, for openDuration. After that, one call is let
+// through as a trial: success closes the breaker again; failure reopens it
+// and restarts the cooldown.
+//
+// Pass failureThreshold <= 0 to disable the breaker for this client: every
+// call always attempts the network, exactly as if this option were never
+// applied.
+func WithBreaker(failureThreshold int, openDuration time.Duration) Option {
+	return func(c *ShardedClient) {
+		c.breakerFailureThreshold = int64(failureThreshold)
+		c.breakerOpenDuration = openDuration
+	}
+}
+
 // NewShardedClient builds a client over a static list of shard addresses
 // (host:port). Connections are opened lazily, on first use per shard.
 //
@@ -68,62 +110,29 @@ func NewShardedClient(addrs []string, opts ...Option) *ShardedClient {
 		panic("deadhorse: NewShardedClient requires at least one shard address")
 	}
 	c := &ShardedClient{
-		shards:   make([]*shardConn, len(addrs)),
-		timeout:  defaultTimeout,
-		failOpen: true,
-	}
-	for i, addr := range addrs {
-		c.shards[i] = &shardConn{addr: addr}
+		timeout:                 defaultTimeout,
+		failOpen:                true,
+		breakerFailureThreshold: defaultBreakerFailureThreshold,
+		breakerOpenDuration:     defaultBreakerOpenDuration,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	c.shards = make([]*shardConn, len(addrs))
+	for i, addr := range addrs {
+		c.shards[i] = &shardConn{addr: addr, breaker: newCircuitBreaker(c.breakerFailureThreshold, c.breakerOpenDuration)}
+	}
 	return c
 }
 
-// Throttle groups entries by shard, checks each shard's group concurrently
-// (one THROTTLE batch per shard), and reassembles the results in the
-// caller's original order. The returned slice is always fully populated,
-// even when the returned error is non-nil; the error is a join of every
-// distinct problem encountered, for callers who just want a cheap "did
-// anything go wrong" check without walking the results themselves.
-func (c *ShardedClient) Throttle(ctx context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
-	byShard := make(map[int][]int, len(c.shards))
-	for i, e := range entries {
-		shard := c.shardFor(e.Key)
-		byShard[shard] = append(byShard[shard], i)
-	}
-
-	results := make([]deadhorse.ResponseEntry, len(entries))
-	errsCh := make(chan error, len(byShard))
-	var wg sync.WaitGroup
-	for shard, idxs := range byShard {
-		wg.Add(1)
-		go func(shard int, idxs []int) {
-			defer wg.Done()
-
-			subEntries := make([]deadhorse.RequestEntry, len(idxs))
-			for j, idx := range idxs {
-				subEntries[j] = entries[idx]
-			}
-
-			subResults, err := c.shards[shard].throttle(ctx, subEntries, c.timeout, c.failOpen)
-			for j, idx := range idxs {
-				results[idx] = subResults[j]
-			}
-			if err != nil {
-				errsCh <- err
-			}
-		}(shard, idxs)
-	}
-	wg.Wait()
-	close(errsCh)
-
-	var errs []error
-	for err := range errsCh {
-		errs = append(errs, err)
-	}
-	return results, errors.Join(errs...)
+// Throttle sends every entry in one call to a single shard -- hash(shardKey)
+// % len(addrs) -- as one DHP/1 line, making the whole call one all-or-none
+// transaction for its non-Peek entries. The returned slice is always fully
+// populated, in the caller's original order, even when the returned error
+// is non-nil.
+func (c *ShardedClient) Throttle(ctx context.Context, shardKey string, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
+	shard := c.shardFor(shardKey)
+	return c.shards[shard].throttle(ctx, entries, c.timeout, c.failOpen)
 }
 
 func (c *ShardedClient) shardFor(key string) int {

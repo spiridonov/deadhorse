@@ -14,6 +14,30 @@ import (
 	"github.com/spiridonov/deadhorse"
 )
 
+// Throttler is what TextServer needs from whatever evaluates its entries:
+// one call, one all-or-none transaction for its non-Peek entries (Peek
+// entries are always independent -- see RequestEntry.Peek), full stop. How
+// many internal steps that takes is entirely up to the implementation.
+// InMemoryThrottler is the one built into this package; a custom
+// implementation can be plugged into NewTextServer instead, for example in
+// tests that want TextServer's line-parsing and dispatch behavior exercised
+// without a real rate limiter behind it (see deadhorsetest).
+//
+// Unlike client.ShardedClient.Throttle, there is deliberately no shard key
+// here: TextServer serves a single, flat keyspace with no notion of shards
+// at all -- routing a key to one of several DeadHorse processes is entirely
+// a client-side concern (see the client package) that's already resolved
+// by the time a line reaches a TextServer.
+//
+// Implementations always return a result slice the same length as entries,
+// in the same order, even when the returned error is non-nil -- a
+// call-level error means something went wrong for some subset of entries,
+// not that nothing can be reported; see ResponseEntry.Err for which ones
+// and why.
+type Throttler interface {
+	Throttle(ctx context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error)
+}
+
 // TextServer serves DHP/1, DeadHorse's line-oriented text protocol, over any
 // Throttler. Each line is one newline-terminated command; a connection may
 // pipeline many requests without waiting for a response to each. TextServer
@@ -21,7 +45,7 @@ import (
 // TextServers, or a cluster -- routing a key to one of several DeadHorse
 // processes is entirely a client-side concern (see the client package).
 type TextServer struct {
-	throttler   deadhorse.Throttler
+	throttler   Throttler
 	maxLineSize int
 	startedAt   time.Time
 
@@ -57,7 +81,7 @@ var errLineTooLong = errors.New("line too long")
 // NewTextServer builds a TextServer over throttler. maxLineSize bounds how
 // long a single protocol line may be before the connection is dropped (see
 // readLine); zero or negative falls back to defaultMaxLineSize.
-func NewTextServer(throttler deadhorse.Throttler, maxLineSize int) *TextServer {
+func NewTextServer(throttler Throttler, maxLineSize int) *TextServer {
 	if maxLineSize <= 0 {
 		maxLineSize = defaultMaxLineSize
 	}

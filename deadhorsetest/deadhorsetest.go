@@ -1,7 +1,13 @@
-// Package deadhorsetest provides Throttler test doubles, in the spirit of
-// the standard library's httptest/iotest: they're for tests that need a
-// deadhorse.Throttler but don't care about its real behavior, not part of
-// the production API surface.
+// Package deadhorsetest provides server.Throttler test doubles, in the
+// spirit of the standard library's httptest/iotest: they're for tests that
+// need a Throttler to plug into a TextServer but don't care about its real
+// behavior, not part of the production API surface.
+//
+// This package deliberately does not import server (which would create an
+// import cycle: server's own tests import this package) -- so conformance
+// to server.Throttler is structural only, not asserted with a `var _`
+// here. server's own tests are what actually exercise these against a real
+// TextServer.
 package deadhorsetest
 
 import (
@@ -13,8 +19,6 @@ import (
 // NoOpThrottler never throttles anything.
 type NoOpThrottler struct{}
 
-var _ deadhorse.Throttler = &NoOpThrottler{}
-
 func (t *NoOpThrottler) Throttle(ctx context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
 	result := make([]deadhorse.ResponseEntry, len(entries))
 	for i, e := range entries {
@@ -25,8 +29,6 @@ func (t *NoOpThrottler) Throttle(ctx context.Context, entries []deadhorse.Reques
 
 // AlwaysTrueThrottler always reports every entry as throttled.
 type AlwaysTrueThrottler struct{}
-
-var _ deadhorse.Throttler = &AlwaysTrueThrottler{}
 
 func (t *AlwaysTrueThrottler) Throttle(ctx context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
 	result := make([]deadhorse.ResponseEntry, len(entries))
