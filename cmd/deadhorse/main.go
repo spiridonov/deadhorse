@@ -12,12 +12,12 @@ import (
 )
 
 var (
-	host           = flag.String("host", "", "The DHP/1 text protocol listen host (empty = all interfaces, matching -prometheus-port's default)")
-	port           = flag.Int("port", 9000, "The DHP/1 text protocol server port")
+	host           = flag.String("host", "", "The DeadHorse and Prometheus listen host (empty = all interfaces)")
+	port           = flag.Int("port", 9000, "The DeadHorse server port")
 	prometheusPort = flag.Int("prometheus-port", 9090, "The Prometheus metrics port")
-	stripes        = flag.Int("stripes", 0, "Number of concurrency stripes in the key/bucket store (0 = default)")
-	gcInterval     = flag.Duration("gc-interval", 0, "How often idle keys are garbage-collected (0 = default)")
-	maxLineSize    = flag.Int("max-line-size", 0, "Maximum DHP/1 protocol line size in bytes (0 = default)")
+	stripes        = flag.Int("stripes", server.DefaultStripes, "Number of concurrency stripes in the key/bucket store")
+	gcInterval     = flag.Duration("gc-interval", server.DefaultGCInterval, "How often idle keys are garbage-collected")
+	maxLineSize    = flag.Int("max-line-size", server.DefaultMaxLineSize, "Maximum DHP/1 protocol line size in bytes")
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 
 	log.Println("Initializing...")
 
-	serveMetrics(*prometheusPort)
+	serveMetrics(*host, *prometheusPort)
 
 	throttler := server.NewInMemoryThrottler(*stripes, *gcInterval)
 	defer throttler.Close()
@@ -34,7 +34,7 @@ func main() {
 	defer textServer.Close()
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
-	log.Printf("Starting DeadHorse text protocol server on %s (metrics on port %d)...", addr, *prometheusPort)
+	log.Printf("Starting DeadHorse server on %s (metrics on port %d)...", addr, *prometheusPort)
 	if err := textServer.ListenAndServe(addr); err != nil {
 		log.Fatalf("text protocol server stopped: %v", err)
 	}
@@ -44,12 +44,12 @@ func main() {
 // even with no application-specific metrics registered, already includes Go
 // runtime and process stats -- goroutines, GC pauses, memory, open file
 // descriptors) on /metrics, in the background.
-func serveMetrics(port int) {
+func serveMetrics(host string, port int) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 
 	go func() {
-		if err := http.ListenAndServe(fmt.Sprintf(":%d", port), mux); err != nil {
+		if err := http.ListenAndServe(fmt.Sprintf("%s:%d", host, port), mux); err != nil {
 			log.Printf("metrics server stopped: %v", err)
 		}
 	}()

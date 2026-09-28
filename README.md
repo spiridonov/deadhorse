@@ -4,10 +4,11 @@
 
 > The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse/discover/).
 
-DeadHorse is a small, fast, distributed rate limiter. A DeadHorse server holds nothing but
-counters — the limit itself (how big the bucket is, how fast it drains) comes with every
-request. And it talks a plain, newline-delimited text protocol simple enough to implement a
-client for in any language with nothing more than a socket and a few string operations.
+DeadHorse is a small, high perfomance, distributed rate limiter. A DeadHorse server holds
+nothing but counters — the limit itself (how big the bucket is, how fast it drains) comes
+with every request. And it talks a plain, newline-delimited text protocol simple enough to
+implement a client for in any language with nothing more than a socket and a few string
+operations.
 
 ```
 $ nc localhost 9000

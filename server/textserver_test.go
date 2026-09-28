@@ -73,11 +73,11 @@ func TestFormatResult(t *testing.T) {
 func TestReadLineSimple(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("PING\nPONG\r\n"))
 
-	line, err := readLine(r, defaultMaxLineSize)
+	line, err := readLine(r, DefaultMaxLineSize)
 	require.NoError(t, err)
 	assert.Equal(t, "PING", line)
 
-	line, err = readLine(r, defaultMaxLineSize)
+	line, err = readLine(r, DefaultMaxLineSize)
 	require.NoError(t, err)
 	assert.Equal(t, "PONG", line, "a trailing \\r before \\n must be trimmed")
 }
@@ -102,7 +102,7 @@ func TestReadLineSpansMultipleInternalBufferFills(t *testing.T) {
 
 func TestReadLineNoTrailingNewlineReturnsError(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("no newline here"))
-	_, err := readLine(r, defaultMaxLineSize)
+	_, err := readLine(r, DefaultMaxLineSize)
 	assert.Error(t, err)
 	assert.NotErrorIs(t, err, errLineTooLong)
 }

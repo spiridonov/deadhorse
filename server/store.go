@@ -5,9 +5,15 @@ import (
 	"time"
 )
 
+// DefaultStripes and DefaultGCInterval are what newStore falls back to when
+// given numStripes<=0 or gcInterval<=0 (see NewInMemoryThrottler, which
+// exposes that same zero-means-default convention for direct embedders).
+// They're exported so cmd/deadhorse can use them as its own -stripes and
+// -gc-interval flag defaults, rather than duplicating these numbers as a
+// second, driftable copy -- see cmd/deadhorse/main.go.
 const (
-	defaultStripes    = 256
-	defaultGCInterval = 60 * time.Second
+	DefaultStripes    = 256
+	DefaultGCInterval = 60 * time.Second
 )
 
 // bucketState is the entire per-key state: one timestamp. mu guards it
@@ -79,10 +85,10 @@ type store struct {
 
 func newStore(numStripes int, gcInterval time.Duration) *store {
 	if numStripes <= 0 {
-		numStripes = defaultStripes
+		numStripes = DefaultStripes
 	}
 	if gcInterval <= 0 {
-		gcInterval = defaultGCInterval
+		gcInterval = DefaultGCInterval
 	}
 
 	st := &store{

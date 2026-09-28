@@ -13,7 +13,7 @@ func TestNewStoreAppliesDefaults(t *testing.T) {
 	st := newStore(0, 0)
 	defer st.close()
 
-	assert.Len(t, st.stripes, defaultStripes, "numStripes<=0 should fall back to defaultStripes")
+	assert.Len(t, st.stripes, DefaultStripes, "numStripes<=0 should fall back to DefaultStripes")
 }
 
 func TestStoreCloseIsIdempotent(t *testing.T) {

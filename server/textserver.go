@@ -61,9 +61,14 @@ type TextServer struct {
 	closed     bool
 }
 
+// DefaultMaxLineSize is what NewTextServer falls back to when given
+// maxLineSize<=0. It's exported so cmd/deadhorse can use it as its own
+// -max-line-size flag default, rather than duplicating this number as a
+// second, driftable copy -- see cmd/deadhorse/main.go.
+const DefaultMaxLineSize = 64 * 1024
+
 const (
-	protocolVersion    = "1"
-	defaultMaxLineSize = 64 * 1024
+	protocolVersion = "1"
 
 	// idleReadTimeout bounds how long a connection may sit with nothing
 	// arriving before it's dropped, so a client that opens a connection and
@@ -80,10 +85,10 @@ var errLineTooLong = errors.New("line too long")
 
 // NewTextServer builds a TextServer over throttler. maxLineSize bounds how
 // long a single protocol line may be before the connection is dropped (see
-// readLine); zero or negative falls back to defaultMaxLineSize.
+// readLine); zero or negative falls back to DefaultMaxLineSize.
 func NewTextServer(throttler Throttler, maxLineSize int) *TextServer {
 	if maxLineSize <= 0 {
-		maxLineSize = defaultMaxLineSize
+		maxLineSize = DefaultMaxLineSize
 	}
 	return &TextServer{
 		throttler:   throttler,

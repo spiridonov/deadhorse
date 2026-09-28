@@ -39,7 +39,8 @@ var _ Throttler = &InMemoryThrottler{}
 
 // NewInMemoryThrottler starts an InMemoryThrottler with the given number of
 // concurrency stripes and GC interval; zero/negative values fall back to
-// sensible defaults. Call Close when done to stop its GC goroutine.
+// DefaultStripes/DefaultGCInterval. Call Close when done to stop its GC
+// goroutine.
 func NewInMemoryThrottler(numStripes int, gcInterval time.Duration) *InMemoryThrottler {
 	return &InMemoryThrottler{store: newStore(numStripes, gcInterval)}
 }
