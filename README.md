@@ -8,7 +8,7 @@ DeadHorse is a small, high perfomance, distributed rate limiter. A DeadHorse ser
 nothing but counters — the limit itself (how big the bucket is, how fast it drains) comes
 with every request. And it talks a plain, newline-delimited text protocol simple enough to
 implement a client for in any language with nothing more than a socket and a few string
-operations.
+operations. It has been tested to hold 20M keys at 220K rps.
 
 ```
 $ nc localhost 9000
