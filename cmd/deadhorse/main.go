@@ -40,10 +40,11 @@ func main() {
 	}
 }
 
-// serveMetrics exposes the process's default Prometheus registry (which,
-// even with no application-specific metrics registered, already includes Go
-// runtime and process stats -- goroutines, GC pauses, memory, open file
-// descriptors) on /metrics, in the background.
+// serveMetrics exposes the process's default Prometheus registry -- Go
+// runtime/process stats plus the server package's own metrics (key counts,
+// request rate/latency, connections, line/batch sizes -- see
+// server/metrics.go), since server registers into this same default
+// registry -- on /metrics, in the background.
 func serveMetrics(host string, port int) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{EnableOpenMetrics: true}))
