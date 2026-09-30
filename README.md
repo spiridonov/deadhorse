@@ -225,6 +225,8 @@ setting); a plain classic-only scrape sees them collapse to a single `+Inf` buck
 
 ### Go client
 
+Most applications only ever talk to one DeadHorse server, so start with `client.Client`:
+
 ```go
 import (
     "context"
@@ -234,10 +236,10 @@ import (
     "github.com/spiridonov/deadhorse/client"
 )
 
-c := client.NewShardedClient([]string{"shard-0:9000", "shard-1:9000"})
+c := client.NewClient("localhost:9000")
 defer c.Close()
 
-results, err := c.Throttle(ctx, "user:42:writes", []deadhorse.RequestEntry{
+results, err := c.Throttle(ctx, []deadhorse.RequestEntry{
     {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}},
 })
 if results[0].Throttled {
@@ -245,12 +247,8 @@ if results[0].Throttled {
 }
 ```
 
-The `shardKey` argument (here, just the one entry's own `Key`) is what `ShardedClient` hashes to
-pick a shard for the whole call -- see [Sharding](#sharding) for using it to force several entries
-onto one shard, and therefore one all-or-none transaction.
-
 `Peek` defaults to `false`, so a `RequestEntry` that forgets to set it still actually enforces the
-limit rather than silently becoming a no-op. `ShardedClient` fails **open** by default: if a shard
+limit rather than silently becoming a no-op. `Client` fails **open** by default: if the server
 can't be reached within its timeout (10ms by default, see `WithTimeout`), the affected entries are
 reported as not throttled rather than failing the caller's request — pass `WithFailClosed()` for
 limits where that's the wrong default. This never applies to an entry rejected by local validation
@@ -263,6 +261,30 @@ request, whether or not `err` is nil, and each `ResponseEntry.Err` says exactly 
 problem and why (see `client.ErrInvalidKey`, `client.ErrEntryRejected`) — `Throttled` itself always
 holds a sensible value either way, so code that only reads `Throttled` works the same whether or
 not it checks the rest.
+
+Every entry passed to one `Throttle` call is sent together as a single DHP/1 line, so it's already
+one all-or-none transaction for its non-`Peek` entries (see
+[DHP/1](#deadhorse-protocol-reference-dhp1)) — there's nothing more to configure with a single
+server.
+
+#### Multiple servers: `ShardedClient`
+
+If you've actually sharded across more than one DeadHorse server (see [Sharding](#sharding)), use
+`client.ShardedClient` instead — it's the same API plus a `shardKey` argument that picks which
+shard a call's entries all go to:
+
+```go
+c := client.NewShardedClient([]string{"shard-0:9000", "shard-1:9000"})
+defer c.Close()
+
+results, err := c.Throttle(ctx, "user:42:writes", []deadhorse.RequestEntry{
+    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}},
+})
+```
+
+`shardKey` (here, just the one entry's own `Key`) is what `ShardedClient` hashes to pick a shard
+for the whole call -- see [Sharding](#sharding) for using it to force several entries onto one
+shard, and therefore one all-or-none transaction.
 
 ### Embedding directly
 
