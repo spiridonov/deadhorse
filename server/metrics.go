@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -36,13 +38,12 @@ var (
 	}, []string{"command"})
 
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "deadhorse",
-		Name:      "request_duration_seconds",
-		Help:      "Time to handle one DHP/1 command line, by command.",
-		// Native-histogram-only: Buckets is deliberately left unset (see
-		// throttleBatchSize below for why that leaves no classic buckets).
-		NativeHistogramBucketFactor:    nativeHistogramBucketFactor,
-		NativeHistogramMaxBucketNumber: nativeHistogramMaxBucketNumber,
+		Namespace:                       "deadhorse",
+		Name:                            "request_duration_seconds",
+		Help:                            "Time to handle one DHP/1 command line, by command.",
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  100,
+		NativeHistogramMinResetDuration: 1 * time.Hour,
 	}, []string{"command"})
 
 	throttleEntriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -52,21 +53,21 @@ var (
 	}, []string{"mode", "result"})
 
 	throttleBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "deadhorse",
-		Name:      "throttle_batch_size",
-		Help:      "Number of entries carried by one THROTTLE line.",
-		// Leaving Buckets nil/empty while NativeHistogramBucketFactor is set
-		// means no classic buckets are created at all -- see HistogramOpts.Buckets.
-		NativeHistogramBucketFactor:    nativeHistogramBucketFactor,
-		NativeHistogramMaxBucketNumber: nativeHistogramMaxBucketNumber,
+		Namespace:                       "deadhorse",
+		Name:                            "throttle_batch_size",
+		Help:                            "Number of entries carried by one THROTTLE line.",
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  100,
+		NativeHistogramMinResetDuration: 1 * time.Hour,
 	})
 
 	lineLength = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace:                      "deadhorse",
-		Name:                           "line_length_bytes",
-		Help:                           "Length in bytes of each protocol line read, excluding the terminator.",
-		NativeHistogramBucketFactor:    nativeHistogramBucketFactor,
-		NativeHistogramMaxBucketNumber: nativeHistogramMaxBucketNumber,
+		Namespace:                       "deadhorse",
+		Name:                            "line_length_bytes",
+		Help:                            "Length in bytes of each protocol line read, excluding the terminator.",
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  100,
+		NativeHistogramMinResetDuration: 1 * time.Hour,
 	})
 
 	lineTooLongTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -74,18 +75,4 @@ var (
 		Name:      "line_too_long_total",
 		Help:      "Number of connections dropped for exceeding the configured maximum line size.",
 	})
-)
-
-const (
-	// nativeHistogramBucketFactor of 1.1 is the trade-off the client_golang
-	// docs recommend: each bucket at most 10% wider than the last (8 buckets
-	// per power of two).
-	nativeHistogramBucketFactor = 1.1
-
-	// nativeHistogramMaxBucketNumber caps how many sparse buckets a single
-	// histogram may populate. line_length_bytes and throttle_batch_size are
-	// driven by values a DHP/1 client controls directly, so leaving this
-	// unbounded (the default) would make an unlimited-bucket native
-	// histogram a memory-DoS vector -- see HistogramOpts.NativeHistogramMaxBucketNumber.
-	nativeHistogramMaxBucketNumber = 160
 )
