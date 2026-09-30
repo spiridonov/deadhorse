@@ -31,25 +31,33 @@ func TestParseEntry(t *testing.T) {
 	}{
 		{
 			name: "valid real mode",
-			tok:  "key|10|1000|1|R",
-			want: deadhorse.RequestEntry{Key: "key", Limit: deadhorse.Limit{Capacity: 10, EmissionInterval: 1000}, Cost: 1, Peek: false},
+			tok:  "key|10|1|1000|1|R",
+			want: deadhorse.RequestEntry{Key: "key", Limit: deadhorse.Limit{Capacity: 10, Rate: deadhorse.Rate{Units: 1, Period: 1000}}, Cost: 1, Peek: false},
 			ok:   true,
 		},
 		{
 			name: "valid peek mode",
-			tok:  "key|10|1000|1|P",
-			want: deadhorse.RequestEntry{Key: "key", Limit: deadhorse.Limit{Capacity: 10, EmissionInterval: 1000}, Cost: 1, Peek: true},
+			tok:  "key|10|1|1000|1|P",
+			want: deadhorse.RequestEntry{Key: "key", Limit: deadhorse.Limit{Capacity: 10, Rate: deadhorse.Rate{Units: 1, Period: 1000}}, Cost: 1, Peek: true},
 			ok:   true,
 		},
-		{name: "too few fields", tok: "key|10|1000", ok: false},
-		{name: "too many fields", tok: "key|10|1000|1|R|extra", ok: false},
-		{name: "empty key", tok: "|10|1000|1|R", ok: false},
-		{name: "non-numeric capacity", tok: "key|x|1000|1|R", ok: false},
-		{name: "negative capacity", tok: "key|-1|1000|1|R", ok: false},
-		{name: "non-numeric emission interval", tok: "key|10|x|1|R", ok: false},
-		{name: "negative cost", tok: "key|10|1000|-1|R", ok: false},
-		{name: "invalid mode", tok: "key|10|1000|1|X", ok: false},
-		{name: "lowercase mode is invalid", tok: "key|10|1000|1|r", ok: false},
+		{
+			name: "valid entry with units greater than one",
+			tok:  "key|10|4|1000|1|R",
+			want: deadhorse.RequestEntry{Key: "key", Limit: deadhorse.Limit{Capacity: 10, Rate: deadhorse.Rate{Units: 4, Period: 1000}}, Cost: 1, Peek: false},
+			ok:   true,
+		},
+		{name: "too few fields", tok: "key|10|1|1000", ok: false},
+		{name: "too many fields", tok: "key|10|1|1000|1|R|extra", ok: false},
+		{name: "empty key", tok: "|10|1|1000|1|R", ok: false},
+		{name: "non-numeric capacity", tok: "key|x|1|1000|1|R", ok: false},
+		{name: "negative capacity", tok: "key|-1|1|1000|1|R", ok: false},
+		{name: "non-numeric units", tok: "key|10|x|1000|1|R", ok: false},
+		{name: "negative units", tok: "key|10|-1|1000|1|R", ok: false},
+		{name: "non-numeric period", tok: "key|10|1|x|1|R", ok: false},
+		{name: "negative cost", tok: "key|10|1|1000|-1|R", ok: false},
+		{name: "invalid mode", tok: "key|10|1|1000|1|X", ok: false},
+		{name: "lowercase mode is invalid", tok: "key|10|1|1000|1|r", ok: false},
 		{name: "key containing whitespace never reaches here as one token", tok: "", ok: false},
 	}
 	for _, c := range cases {
@@ -154,8 +162,8 @@ func TestDispatchStats(t *testing.T) {
 	// InMemoryThrottler does implement it, and STATS should reflect real usage.
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
-	th.Throttle(context.Background(), []deadhorse.RequestEntry{{Key: "a", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: 1}}})
-	th.Throttle(context.Background(), []deadhorse.RequestEntry{{Key: "b", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: 1}}})
+	th.Throttle(context.Background(), []deadhorse.RequestEntry{{Key: "a", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: 1}}}})
+	th.Throttle(context.Background(), []deadhorse.RequestEntry{{Key: "b", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: 1}}}})
 
 	srv = NewTextServer(th, 0)
 	resp, _ = srv.dispatch("STATS")
@@ -176,7 +184,7 @@ func TestHandleThrottleAllEntriesMalformed(t *testing.T) {
 
 func TestHandleThrottleMixedValidAndMalformedPreservesOrder(t *testing.T) {
 	srv := NewTextServer(&deadhorsetest.NoOpThrottler{}, 0)
-	got := srv.handleThrottle("badtoken key|1|1000|1|R")
+	got := srv.handleThrottle("badtoken key|1|1|1000|1|R")
 	assert.Equal(t, "RESULT ERR key|0|0|0", got)
 }
 
@@ -190,7 +198,7 @@ func (erroringThrottler) Throttle(context.Context, []deadhorse.RequestEntry) ([]
 
 func TestHandleThrottleThrottlerErrorDoesNotSinkWholeBatch(t *testing.T) {
 	srv := NewTextServer(erroringThrottler{}, 0)
-	got := srv.handleThrottle("key-a|1|1000|1|R key-b|1|1000|1|R")
+	got := srv.handleThrottle("key-a|1|1|1000|1|R key-b|1|1|1000|1|R")
 	assert.Equal(t, "RESULT ERR ERR", got, "a throttler-level error must report ERR per affected entry, not abort the whole line")
 
 	// The connection-level behavior matters too: an aborted line used to
@@ -215,7 +223,7 @@ func (shortResponseThrottler) Throttle(_ context.Context, entries []deadhorse.Re
 
 func TestHandleThrottleMismatchedResponseLengthDoesNotSinkWholeBatch(t *testing.T) {
 	srv := NewTextServer(shortResponseThrottler{}, 0)
-	got := srv.handleThrottle("key-a|1|1000|1|R key-b|1|1000|1|R")
+	got := srv.handleThrottle("key-a|1|1|1000|1|R key-b|1|1|1000|1|R")
 	assert.Equal(t, "RESULT ERR ERR", got, "a Throttler returning the wrong-length slice must be treated as a failure, not panic or leave entries blank")
 }
 
@@ -385,10 +393,10 @@ func TestTextServerThrottleSingleKey(t *testing.T) {
 	addr := startTestServer(t, th)
 	client := dialTestServer(t, addr)
 
-	got := client.sendRecv("THROTTLE org:acme:writes|1|3600000000000|1|R")
+	got := client.sendRecv("THROTTLE org:acme:writes|1|1|3600000000000|1|R")
 	assert.Equal(t, "RESULT org:acme:writes|0|1|0", got, "first request into an empty capacity-1 bucket")
 
-	got = client.sendRecv("THROTTLE org:acme:writes|1|3600000000000|1|R")
+	got = client.sendRecv("THROTTLE org:acme:writes|1|1|3600000000000|1|R")
 	require.Contains(t, got, "org:acme:writes|1|0|", "second request should be throttled")
 }
 
@@ -398,7 +406,7 @@ func TestTextServerThrottleBatchMultipleKeys(t *testing.T) {
 	addr := startTestServer(t, th)
 	client := dialTestServer(t, addr)
 
-	got := client.sendRecv("THROTTLE tenant-a|1|1000|1|R tenant-b|1|1000|1|R")
+	got := client.sendRecv("THROTTLE tenant-a|1|1|1000|1|R tenant-b|1|1|1000|1|R")
 	assert.Equal(t, "RESULT tenant-a|0|1|0 tenant-b|0|1|0", got)
 }
 
@@ -412,12 +420,12 @@ func TestTextServerThrottleBatchAllOrNone(t *testing.T) {
 	addr := startTestServer(t, th)
 	client := dialTestServer(t, addr)
 
-	const hourNS = "3600000000000" // 1h emission interval, comfortably longer than this test takes to run
+	const hourNS = "3600000000000" // 1h leak period, comfortably longer than this test takes to run
 
-	got := client.sendRecv("THROTTLE user:42:writes|1|" + hourNS + "|1|R")
+	got := client.sendRecv("THROTTLE user:42:writes|1|1|" + hourNS + "|1|R")
 	assert.Equal(t, "RESULT user:42:writes|0|1|0", got, "warm-up: exhaust the user-level bucket on its own")
 
-	got = client.sendRecv("THROTTLE org:acme:writes|100|" + hourNS + "|1|R user:42:writes|1|" + hourNS + "|1|R")
+	got = client.sendRecv("THROTTLE org:acme:writes|100|1|" + hourNS + "|1|R user:42:writes|1|1|" + hourNS + "|1|R")
 	// user's retry_after is "just under an hour" (some of the interval
 	// already drained by wall-clock time since the warm-up call above), so
 	// match it as a pattern rather than pin the exact nanosecond count --
@@ -427,7 +435,7 @@ func TestTextServerThrottleBatchAllOrNone(t *testing.T) {
 		"the whole line is denied because the user-level check is: org's own remaining/retry_after are unchanged, only its throttled bit flips")
 
 	// The org bucket must not have been touched by the denied line.
-	got = client.sendRecv("THROTTLE org:acme:writes|100|" + hourNS + "|1|R")
+	got = client.sendRecv("THROTTLE org:acme:writes|100|1|" + hourNS + "|1|R")
 	assert.Equal(t, "RESULT org:acme:writes|0|100|0", got, "org's bucket should still be fresh: the earlier line never committed")
 }
 
@@ -437,7 +445,7 @@ func TestTextServerThrottleMalformedEntryMidBatch(t *testing.T) {
 	addr := startTestServer(t, th)
 	client := dialTestServer(t, addr)
 
-	got := client.sendRecv("THROTTLE not-a-valid-entry good-key|1|1000|1|R")
+	got := client.sendRecv("THROTTLE not-a-valid-entry good-key|1|1|1000|1|R")
 	assert.Equal(t, "RESULT ERR good-key|0|1|0", got, "a malformed entry must not sink the rest of the batch")
 
 	// The connection must still be usable afterwards.

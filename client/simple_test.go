@@ -21,7 +21,7 @@ func TestClientSingleEntryRoundTrip(t *testing.T) {
 	c := NewClient(addr)
 	defer c.Close()
 
-	entry := deadhorse.RequestEntry{Key: "user:1", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "user:1", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	r1, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{entry})
 	require.NoError(t, err)
@@ -44,8 +44,8 @@ func TestClientBatchIsOneAllOrNoneLine(t *testing.T) {
 	c := NewClient(addr)
 	defer c.Close()
 
-	org := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: time.Hour}}
-	user := deadhorse.RequestEntry{Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	org := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 100, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
+	user := deadhorse.RequestEntry{Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	r, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{user})
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestClientPassesThroughOptions(t *testing.T) {
 	defer c.Close()
 
 	results, err := c.Throttle(context.Background(), []deadhorse.RequestEntry{
-		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.Error(t, err)
 	require.Len(t, results, 1)

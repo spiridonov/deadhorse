@@ -29,7 +29,7 @@ func TestInMemoryThrottlerBurstThenThrottle(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 2, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 2, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	r1 := throttle1(t, th, entry)
 	require.False(t, r1.Throttled, "1st request into a capacity-2 bucket should be admitted")
@@ -42,7 +42,7 @@ func TestInMemoryThrottlerBurstThenThrottle(t *testing.T) {
 }
 
 func TestInMemoryThrottlerWorkedExample(t *testing.T) {
-	// Mirrors the reference scenario: capacity=100, emission_interval=10ms
+	// Mirrors the reference scenario: capacity=100, rate=1 unit/10ms
 	// (100 req/s sustained, burst of 100). Each request is its own Throttle
 	// call (its own line, its own transaction) -- unlike the batch-of-101
 	// this test used before all-or-none grouping existed, sending all 101
@@ -52,7 +52,7 @@ func TestInMemoryThrottlerWorkedExample(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}}
+	entry := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 100, Rate: deadhorse.Rate{Units: 1, Period: 10 * time.Millisecond}}}
 
 	const n = 101
 	throttledCount := 0
@@ -65,11 +65,11 @@ func TestInMemoryThrottlerWorkedExample(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, throttledCount, "expected exactly 1 throttled request (the 101st)")
-	// Roughly one emission interval: unlike the single shared "now" a
+	// Roughly one leak period: unlike the single shared "now" a
 	// batch-of-101 gave this test before, 101 separate calls each take
-	// their own real time.Now(), so a little of the interval has already
+	// their own real time.Now(), so a little of the period has already
 	// drained by the time the 101st call happens.
-	assert.InDelta(t, 10*time.Millisecond, lastRetryAfter, float64(5*time.Millisecond), "roughly one emission interval")
+	assert.InDelta(t, 10*time.Millisecond, lastRetryAfter, float64(5*time.Millisecond), "roughly one leak period")
 	assert.Positive(t, lastRetryAfter)
 }
 
@@ -77,7 +77,7 @@ func TestInMemoryThrottlerPeekDoesNotConsume(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	peekEntry := deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}, Peek: true}
+	peekEntry := deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}, Peek: true}
 	realEntry := peekEntry
 	realEntry.Peek = false
 
@@ -101,7 +101,7 @@ func TestInMemoryThrottlerDefaultIsRealNotPeek(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "default-mode", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "default-mode", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 	r1 := throttle1(t, th, entry)
 	require.False(t, r1.Throttled, "first request into an empty capacity-1 bucket should be admitted")
 	r2 := throttle1(t, th, entry)
@@ -112,7 +112,7 @@ func TestInMemoryThrottlerUnsetCostDefaultsToOne(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "cost-default", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "cost-default", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 	// entry.Cost is left at its zero value on purpose, matching every
 	// caller written before RequestEntry.Cost existed.
 	r1 := throttle1(t, th, entry)
@@ -125,7 +125,7 @@ func TestInMemoryThrottlerExplicitCostConsumesMultipleUnits(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	spend := deadhorse.RequestEntry{Key: "cost-key", Limit: deadhorse.Limit{Capacity: 5, EmissionInterval: time.Hour}, Cost: 3}
+	spend := deadhorse.RequestEntry{Key: "cost-key", Limit: deadhorse.Limit{Capacity: 5, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}, Cost: 3}
 	r1 := throttle1(t, th, spend)
 	require.False(t, r1.Throttled, "a cost-3 request into a capacity-5 bucket should be admitted")
 	assert.EqualValues(t, 5, r1.Remaining, "Remaining reflects headroom before this request's own cost")
@@ -142,8 +142,8 @@ func TestInMemoryThrottlerKeysAreIndependent(t *testing.T) {
 	defer th.Close()
 
 	entries := []deadhorse.RequestEntry{
-		{Key: "tenant-a", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
-		{Key: "tenant-b", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "tenant-a", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
+		{Key: "tenant-b", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	}
 	// Exhaust tenant-a's bucket with its own call; tenant-b, checked with a
 	// separate call of its own, must be unaffected. Two different keys
@@ -167,8 +167,8 @@ func TestInMemoryThrottlerRealGroupIsAllOrNone(t *testing.T) {
 	defer th.Close()
 
 	// Exhaust tenant-a on its own first, so it's the one that fails.
-	tenantA := deadhorse.RequestEntry{Key: "tenant-a", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
-	tenantB := deadhorse.RequestEntry{Key: "tenant-b", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	tenantA := deadhorse.RequestEntry{Key: "tenant-a", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
+	tenantB := deadhorse.RequestEntry{Key: "tenant-b", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 	require.False(t, throttle1(t, th, tenantA).Throttled, "warm-up call should exhaust tenant-a's one unit of capacity")
 
 	results, err := th.Throttle(context.Background(), []deadhorse.RequestEntry{tenantA, tenantB})
@@ -186,8 +186,8 @@ func TestInMemoryThrottlerRealGroupCommitsOnlyWhenAllAdmit(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	tenantA := deadhorse.RequestEntry{Key: "tenant-a-ok", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
-	tenantB := deadhorse.RequestEntry{Key: "tenant-b-ok", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	tenantA := deadhorse.RequestEntry{Key: "tenant-a-ok", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
+	tenantB := deadhorse.RequestEntry{Key: "tenant-b-ok", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	results, err := th.Throttle(context.Background(), []deadhorse.RequestEntry{tenantA, tenantB})
 	require.NoError(t, err)
@@ -207,10 +207,10 @@ func TestInMemoryThrottlerPeekIndependentOfRealGroup(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	real := deadhorse.RequestEntry{Key: "real-key", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	real := deadhorse.RequestEntry{Key: "real-key", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 	require.False(t, throttle1(t, th, real).Throttled, "warm-up call should exhaust real-key's one unit")
 
-	peek := deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}, Peek: true}
+	peek := deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}, Peek: true}
 	results, err := th.Throttle(context.Background(), []deadhorse.RequestEntry{real, peek})
 	require.NoError(t, err)
 	require.Len(t, results, 2)
@@ -219,7 +219,7 @@ func TestInMemoryThrottlerPeekIndependentOfRealGroup(t *testing.T) {
 
 	// And the Peek entry must not have consumed peek-key's capacity either,
 	// same as always.
-	assert.False(t, throttle1(t, th, deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}).Throttled)
+	assert.False(t, throttle1(t, th, deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}).Throttled)
 }
 
 func TestInMemoryThrottlerRealGroupChainsRepeatedKey(t *testing.T) {
@@ -232,7 +232,7 @@ func TestInMemoryThrottlerRealGroupChainsRepeatedKey(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "repeated-key", Limit: deadhorse.Limit{Capacity: 2, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "repeated-key", Limit: deadhorse.Limit{Capacity: 2, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 	results, err := th.Throttle(context.Background(), []deadhorse.RequestEntry{entry, entry})
 	require.NoError(t, err)
 	require.Len(t, results, 2)
@@ -258,7 +258,7 @@ func TestInMemoryThrottlerRealGroupNoDeadlockWithOverlappingKeys(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("key-%d", i)
 	}
-	limit := deadhorse.Limit{Capacity: 1_000_000, EmissionInterval: time.Nanosecond}
+	limit := deadhorse.Limit{Capacity: 1_000_000, Rate: deadhorse.Rate{Units: 1, Period: time.Nanosecond}}
 
 	const goroutines = 50
 	const callsPerGoroutine = 50
@@ -290,13 +290,13 @@ func TestInMemoryThrottlerRealGroupNoDeadlockWithOverlappingKeys(t *testing.T) {
 	}
 }
 
-func TestInMemoryThrottlerZeroEmissionIntervalFailsClosed(t *testing.T) {
+func TestInMemoryThrottlerZeroPeriodFailsClosed(t *testing.T) {
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "bad-config", Limit: deadhorse.Limit{Capacity: 10, EmissionInterval: 0}}
+	entry := deadhorse.RequestEntry{Key: "bad-config", Limit: deadhorse.Limit{Capacity: 10, Rate: deadhorse.Rate{Units: 1, Period: 0}}}
 	r := throttle1(t, th, entry)
-	assert.True(t, r.Throttled, "a zero emission interval must fail closed, not panic or admit")
+	assert.True(t, r.Throttled, "a zero leak period must fail closed, not panic or admit")
 	assert.NoError(t, r.Err, "a nonsensical limit fails closed, it doesn't error -- InMemoryThrottler never sets Err")
 }
 
@@ -305,7 +305,7 @@ func TestInMemoryThrottlerGCResetsIdleKeys(t *testing.T) {
 	th := NewInMemoryThrottler(4, gcInterval)
 	defer th.Close()
 
-	entry := deadhorse.RequestEntry{Key: "idle-tenant", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "idle-tenant", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	require.False(t, throttle1(t, th, entry).Throttled, "first touch should be admitted")
 	require.True(t, throttle1(t, th, entry).Throttled, "second touch on a capacity-1, 1h-refill bucket should be throttled before any GC")
@@ -320,8 +320,8 @@ func TestInMemoryThrottlerKeyCountEstimate(t *testing.T) {
 	defer th.Close()
 
 	assert.Zero(t, th.keyCountEstimate())
-	throttle1(t, th, deadhorse.RequestEntry{Key: "k1", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: 1}, Peek: true})
-	throttle1(t, th, deadhorse.RequestEntry{Key: "k2", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: 1}, Peek: true})
+	throttle1(t, th, deadhorse.RequestEntry{Key: "k1", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: 1}}, Peek: true})
+	throttle1(t, th, deadhorse.RequestEntry{Key: "k2", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: 1}}, Peek: true})
 	assert.Equal(t, 2, th.keyCountEstimate())
 }
 
@@ -333,8 +333,8 @@ func TestInMemoryThrottlerRespectsCancelledContext(t *testing.T) {
 	cancel()
 
 	entries := []deadhorse.RequestEntry{
-		{Key: "k1", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
-		{Key: "k2", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k1", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
+		{Key: "k2", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	}
 	results, err := th.Throttle(ctx, entries)
 	assert.ErrorIs(t, err, context.Canceled)

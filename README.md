@@ -8,11 +8,11 @@ DeadHorse is a small, high perfomance, distributed rate limiter. A DeadHorse ser
 nothing but counters — the limit itself (how big the bucket is, how fast it drains) comes
 with every request. And it talks a plain, newline-delimited text protocol simple enough to
 implement a client for in any language with nothing more than a socket and a few string
-operations. It has been tested to hold 20M keys at 220K rps.
+operations. It has been tested to hold at least 20M keys at 220K rps per one process.
 
 ```
 $ nc localhost 9000
-THROTTLE user:42:writes|100|10000000|1|R
+THROTTLE user:42:writes|100|1|10000000|1|R
 RESULT user:42:writes|0|100|0
 ```
 
@@ -38,21 +38,26 @@ Precision is traded for perfomance, simplicity, and high availability:
 ## Leaky Bucket via GCRA
 
 DeadHorse rate-limits with a *leaky bucket*: each request adds `cost` units of water to a bucket
-of size `capacity`. The bucket continuously drains at a fixed rate (one unit every
-`emission_interval` nanoseconds). A request is admitted only if there's room for its cost once
-the drain since the last request is accounted for. Get a burst of `capacity` requests through
-instantly, then settle into a steady `1/emission_interval` requests per second.
+of size `capacity`. The bucket continuously drains at a fixed rate, expressed as a ratio —
+`units` cost units every `period` nanoseconds. A request is admitted only if there's room for its
+cost once the drain since the last request is accounted for. Get a burst of `capacity` requests
+through instantly, then settle into a steady `units/period` requests per second.
+
+Expressing the rate as a ratio rather than a single "nanoseconds per unit" duration is what lets
+DeadHorse reach rates well past 1 unit/ns: a duration alone can't go below 1ns per unit, which
+caps out around 1e9 units/sec — nowhere near enough for a byte-cost limit like `10Gb/s`. Scaling
+`units` up instead removes that ceiling, while staying pure integer arithmetic throughout.
 
 Rather than storing an explicit water level that has to be recomputed and rewritten on every call,
 DeadHorse implements this with GCRA 
 ([Generic Cell Rate Algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm)): the 
 entire state of a bucket is a single timestamp, the *theoretical arrival time* (TAT) — the point 
 in time at which the bucket would next have room. Checking a request is a handful of integer 
-comparisons against `now`; admitting one just pushes the TAT forward by `cost * emission_interval`.
+comparisons against `now`; admitting one just pushes the TAT forward by `cost * period / units`.
 No floating point, no locks beyond the one guarding that single field, nothing to refill on read.
 
 ```
-capacity=100, emission_interval=10ms  →  100 requests/sec sustained, bursts of 100
+capacity=100, units=1, period=10ms  →  100 requests/sec sustained, bursts of 100
 
 100 requests arrive at once  →  all 100 admitted, bucket now "full"
 101st request, same instant  →  throttled, retry after ~10ms (one unit has to drain first)
@@ -111,7 +116,7 @@ expiry timer or a periodic scan of every key, each stripe keeps **two map genera
 A key that's touched at least once per interval never leaves `hot` and survives forever; a key
 that goes untouched for one to two intervals gets dropped for free, with no scan and no per-key
 bookkeeping. The interval is configurable (`-gc-interval`); pick something comfortably larger than
-the longest burst window (`capacity * emission_interval`) any of your limits actually use.
+the longest burst window (`capacity * period / units`) any of your limits actually use.
 
 ## DeadHorse Protocol reference (DHP/1)
 
@@ -130,10 +135,12 @@ them. Keys may be any non-empty run of bytes containing no whitespace and no `|`
 An `<entry>` in a `THROTTLE` line is one pipe-separated tuple:
 
 ```
-key|capacity|emission_interval_ns|cost|mode
+key|capacity|units|period_ns|cost|mode
 ```
 
-`mode` is `R` (real — consume on success) or `P` (peek — never mutates state). The matching
+The bucket drains at `units` cost units every `period_ns` nanoseconds — see
+[Leaky Bucket via GCRA](#leaky-bucket-via-gcra). `mode` is `R` (real — consume on success) or `P`
+(peek — never mutates state). The matching
 `<result>` in the response is:
 
 ```
@@ -165,7 +172,7 @@ reported on its own, exactly as if it were the only entry on the line.
 A worked example, batching a per-org and a per-user check in one round trip:
 
 ```
-> THROTTLE org:acme:writes|100|10000000|1|R user:42:writes|20|50000000|1|R
+> THROTTLE org:acme:writes|100|1|10000000|1|R user:42:writes|20|1|50000000|1|R
 < RESULT org:acme:writes|1|63|0 user:42:writes|1|0|12000000
 ```
 
@@ -187,6 +194,12 @@ a firewall otherwise.
 ```sh
 go install github.com/spiridonov/deadhorse/cmd/deadhorse@latest
 deadhorse
+```
+
+Or run in Docker:
+
+```sh
+docker run spiridonov1/deadhorse
 ```
 
 | Flag | Default | Meaning |
@@ -240,12 +253,16 @@ c := client.NewClient("localhost:9000")
 defer c.Close()
 
 results, err := c.Throttle(ctx, []deadhorse.RequestEntry{
-    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}},
+    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, Rate: deadhorse.Rate{Units: 100, Period: time.Second}}},
 })
 if results[0].Throttled {
     // reject the request; results[0].RetryAfter says how long until it would fit
 }
 ```
+
+A `Limit` is its `Capacity` plus a `Rate` of `Units` cost units draining every `Period`. "5 rps" is
+`Rate{Units: 5, Period: time.Second}`; a byte-cost `"10Gb/s"` limit is `Rate{Units: 1_250_000_000,
+Period: time.Second}`.
 
 `Peek` defaults to `false`, so a `RequestEntry` that forgets to set it still actually enforces the
 limit rather than silently becoming a no-op. `Client` fails **open** by default: if the server
@@ -278,7 +295,7 @@ c := client.NewShardedClient([]string{"shard-0:9000", "shard-1:9000"})
 defer c.Close()
 
 results, err := c.Throttle(ctx, "user:42:writes", []deadhorse.RequestEntry{
-    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}},
+    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, Rate: deadhorse.Rate{Units: 100, Period: time.Second}}},
 })
 ```
 
@@ -298,7 +315,7 @@ throttler := server.NewInMemoryThrottler(0, 0) // 0 = default stripes/GC interva
 defer throttler.Close()
 
 results, err := throttler.Throttle(ctx, []deadhorse.RequestEntry{
-    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: 10 * time.Millisecond}},
+    {Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 100, Rate: deadhorse.Rate{Units: 100, Period: time.Second}}},
 })
 ```
 

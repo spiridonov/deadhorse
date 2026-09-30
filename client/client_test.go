@@ -81,7 +81,7 @@ func TestShardedClientDialRespectsContextInsteadOfHanging(t *testing.T) {
 
 	start := time.Now()
 	_, err := c.Throttle(ctx, "k", []deadhorse.RequestEntry{
-		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	elapsed := time.Since(start)
 
@@ -110,7 +110,7 @@ func TestShardedClientConcurrentFirstCallsShareOneDial(t *testing.T) {
 			defer wg.Done()
 			key := fmt.Sprintf("first-dial-%d", i)
 			_, err := c.Throttle(context.Background(), key, []deadhorse.RequestEntry{
-				{Key: key, Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+				{Key: key, Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 			})
 			errs[i] = err
 		}(i)
@@ -135,14 +135,14 @@ func TestShardedClientThrottleAfterCloseReturnsErrClosed(t *testing.T) {
 	// One real call first, so there's an actual established connection for
 	// Close to tear down (not just an unused, never-dialed shardConn).
 	_, err := c.Throttle(context.Background(), "warm-up", []deadhorse.RequestEntry{
-		{Key: "warm-up", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "warm-up", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.NoError(t, err)
 
 	c.Close()
 
 	results, err := c.Throttle(context.Background(), "after-close", []deadhorse.RequestEntry{
-		{Key: "after-close", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "after-close", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, net.ErrClosed)
@@ -191,7 +191,7 @@ func TestShardedClientCloseDoesNotBlockOnFullPendingQueue(t *testing.T) {
 			defer cancel()
 			key := fmt.Sprintf("filler-%d", i)
 			c.Throttle(ctx, key, []deadhorse.RequestEntry{
-				{Key: key, Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+				{Key: key, Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 			})
 		}(i)
 	}
@@ -202,7 +202,7 @@ func TestShardedClientCloseDoesNotBlockOnFullPendingQueue(t *testing.T) {
 	// that entire wait.
 	go func() {
 		c.Throttle(context.Background(), "blocked", []deadhorse.RequestEntry{
-			{Key: "blocked", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+			{Key: "blocked", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 		})
 	}()
 	time.Sleep(50 * time.Millisecond) // give it time to actually start waiting
@@ -222,7 +222,7 @@ func TestShardedClientSingleEntryRoundTrip(t *testing.T) {
 	c := NewShardedClient([]string{addr})
 	defer c.Close()
 
-	entry := deadhorse.RequestEntry{Key: "user:1", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	entry := deadhorse.RequestEntry{Key: "user:1", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	r1, err := c.Throttle(context.Background(), entry.Key, []deadhorse.RequestEntry{entry})
 	require.NoError(t, err)
@@ -243,8 +243,8 @@ func TestShardedClientBatchAcrossKeys(t *testing.T) {
 	defer c.Close()
 
 	entries := []deadhorse.RequestEntry{
-		{Key: "tenant-a", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
-		{Key: "tenant-b", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "tenant-a", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
+		{Key: "tenant-b", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	}
 	// Both admit, so which shardKey groups them together doesn't affect the
 	// outcome here -- see TestShardedClientShardKeyGroupsEntriesOntoOneLine
@@ -264,7 +264,7 @@ func TestShardedClientPeekDoesNotConsume(t *testing.T) {
 	c := NewShardedClient([]string{addr})
 	defer c.Close()
 
-	peek := deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}, Peek: true}
+	peek := deadhorse.RequestEntry{Key: "peek-key", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}, Peek: true}
 	for i := 0; i < 3; i++ {
 		r, err := c.Throttle(context.Background(), peek.Key, []deadhorse.RequestEntry{peek})
 		require.NoError(t, err)
@@ -289,8 +289,8 @@ func TestShardedClientInvalidKeyDoesNotSinkRestOfBatch(t *testing.T) {
 	defer c.Close()
 
 	entries := []deadhorse.RequestEntry{
-		{Key: "bad key with spaces", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
-		{Key: "good-key", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "bad key with spaces", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
+		{Key: "good-key", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	}
 	results, err := c.Throttle(context.Background(), "invalid-key-batch", entries)
 	require.Error(t, err, "the call-level error should surface the validation problem")
@@ -314,7 +314,7 @@ func TestShardedClientFailOpenOnUnreachableShard(t *testing.T) {
 	defer c.Close()
 
 	results, err := c.Throttle(context.Background(), "k", []deadhorse.RequestEntry{
-		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.Error(t, err)
 	require.Len(t, results, 1)
@@ -332,7 +332,7 @@ func TestShardedClientFailClosedOnUnreachableShard(t *testing.T) {
 	defer c.Close()
 
 	results, err := c.Throttle(context.Background(), "k", []deadhorse.RequestEntry{
-		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.Error(t, err)
 	require.Len(t, results, 1)
@@ -355,7 +355,7 @@ func TestShardedClientServerRejectionSurfacesErrEntryRejected(t *testing.T) {
 	// "no"), not a call-level failure, so the aggregate error stays nil --
 	// only ResponseEntry.Err carries the detail.
 	r, err := c.Throttle(context.Background(), "bad-limit", []deadhorse.RequestEntry{
-		{Key: "bad-limit", Limit: deadhorse.Limit{Capacity: -1, EmissionInterval: time.Hour}},
+		{Key: "bad-limit", Limit: deadhorse.Limit{Capacity: -1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.NoError(t, err)
 	require.Len(t, r, 1)
@@ -388,7 +388,7 @@ func TestShardedClientContextCancellation(t *testing.T) {
 
 	start := time.Now()
 	_, err = c.Throttle(ctx, "k", []deadhorse.RequestEntry{
-		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	elapsed := time.Since(start)
 
@@ -421,7 +421,7 @@ func TestShardedClientConcurrentCallsAreCorrectlyMatched(t *testing.T) {
 	entryFor := func(i int) deadhorse.RequestEntry {
 		return deadhorse.RequestEntry{
 			Key:   fmt.Sprintf("k-%d", i),
-			Limit: deadhorse.Limit{Capacity: int64(100 + i), EmissionInterval: time.Hour},
+			Limit: deadhorse.Limit{Capacity: int64(100 + i), Rate: deadhorse.Rate{Units: 1, Period: time.Hour}},
 		}
 	}
 
@@ -479,7 +479,7 @@ func TestShardedClientBreakerFailsFastAfterRepeatedTimeouts(t *testing.T) {
 	call := func() (time.Duration, error) {
 		start := time.Now()
 		_, err := c.Throttle(context.Background(), "k", []deadhorse.RequestEntry{
-			{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+			{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 		})
 		return time.Since(start), err
 	}
@@ -529,7 +529,7 @@ func TestShardedClientBreakerDoesNotTripOnCallerImposedTimeout(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 		_, err := c.Throttle(ctx, "k", []deadhorse.RequestEntry{
-			{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+			{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 		})
 		cancel()
 		require.Error(t, err)
@@ -549,8 +549,8 @@ func TestShardedClientShardKeyGroupsEntriesOntoOneLine(t *testing.T) {
 	c := NewShardedClient([]string{addr})
 	defer c.Close()
 
-	org := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 100, EmissionInterval: time.Hour}}
-	user := deadhorse.RequestEntry{Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}}
+	org := deadhorse.RequestEntry{Key: "org:acme:writes", Limit: deadhorse.Limit{Capacity: 100, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
+	user := deadhorse.RequestEntry{Key: "user:42:writes", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}}
 
 	// Exhaust the user-level bucket on its own first.
 	r, err := c.Throttle(context.Background(), "req-1", []deadhorse.RequestEntry{user})
@@ -579,7 +579,7 @@ func TestShardedClientNoOpThrottlerViaTextServer(t *testing.T) {
 	defer c.Close()
 
 	r, err := c.Throttle(context.Background(), "k", []deadhorse.RequestEntry{
-		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: time.Hour}},
+		{Key: "k", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: time.Hour}}},
 	})
 	require.NoError(t, err)
 	assert.False(t, r[0].Throttled)

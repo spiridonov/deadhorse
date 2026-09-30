@@ -39,7 +39,7 @@ var (
 	requestTimeout   = flag.Duration("request-timeout", 2*time.Second, "Per-request timeout")
 	failClosed       = flag.Bool("fail-closed", false, "Treat an unreachable shard as throttled instead of the client's default fail-open")
 	capacityFlag     = flag.Int64("capacity", 1000, "Limit.Capacity sent with every request")
-	emissionInterval = flag.Duration("emission-interval", 1*time.Millisecond, "Limit.EmissionInterval sent with every request")
+	emissionInterval = flag.Duration("emission-interval", 1*time.Millisecond, "Limit.Rate.Period sent with every request (Units is always 1)")
 	costFlag         = flag.Int64("cost", 1, "Cost sent with every request")
 	peekFlag         = flag.Bool("peek", false, "Send requests in peek mode (never consumes a bucket)")
 	reportInterval   = flag.Duration("report-interval", 1*time.Second, "How often to print progress")
@@ -65,7 +65,7 @@ func main() {
 		*concurrency = *numKeys
 	}
 
-	limit := deadhorse.Limit{Capacity: *capacityFlag, EmissionInterval: *emissionInterval}
+	limit := deadhorse.Limit{Capacity: *capacityFlag, Rate: deadhorse.Rate{Units: 1, Period: *emissionInterval}}
 
 	log.Printf("deadhorse keyspace: %d keys, %d connections, running for %s -> %s",
 		*numKeys, *concurrency, *duration, strings.Join(addrs, ","))

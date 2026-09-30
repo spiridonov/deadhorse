@@ -36,7 +36,7 @@ var (
 	failClosed       = flag.Bool("fail-closed", false, "Treat an unreachable shard as throttled instead of the client's default fail-open")
 	keyPrefix        = flag.String("key-prefix", "loadtest", "Prefix for generated key names (keys are <prefix>-<n>)")
 	capacityFlag     = flag.Int64("capacity", 1000, "Limit.Capacity sent with every request")
-	emissionInterval = flag.Duration("emission-interval", 1*time.Millisecond, "Limit.EmissionInterval sent with every request")
+	emissionInterval = flag.Duration("emission-interval", 1*time.Millisecond, "Limit.Rate.Period sent with every request (Units is always 1)")
 	costFlag         = flag.Int64("cost", 1, "Cost sent with every request")
 	peekFlag         = flag.Bool("peek", false, "Send requests in peek mode (never consumes a bucket)")
 	seedFlag         = flag.Uint64("seed", 0, "Seed for per-key weight assignment (0 = pick a random seed each run and log it)")
@@ -63,7 +63,7 @@ func main() {
 		log.Fatal("-rate must be positive")
 	}
 
-	limit := deadhorse.Limit{Capacity: *capacityFlag, EmissionInterval: *emissionInterval}
+	limit := deadhorse.Limit{Capacity: *capacityFlag, Rate: deadhorse.Rate{Units: 1, Period: *emissionInterval}}
 
 	seed := *seedFlag
 	if seed == 0 {

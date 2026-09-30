@@ -13,8 +13,8 @@ import (
 func TestNoOpThrottlerNeverThrottles(t *testing.T) {
 	th := &NoOpThrottler{}
 	entries := []deadhorse.RequestEntry{
-		{Key: "a", Limit: deadhorse.Limit{Capacity: 1, EmissionInterval: 1}},
-		{Key: "b", Limit: deadhorse.Limit{Capacity: 0, EmissionInterval: 0}},
+		{Key: "a", Limit: deadhorse.Limit{Capacity: 1, Rate: deadhorse.Rate{Units: 1, Period: 1}}},
+		{Key: "b", Limit: deadhorse.Limit{Capacity: 0, Rate: deadhorse.Rate{Units: 1, Period: 0}}},
 	}
 	got, err := th.Throttle(context.Background(), entries)
 	require.NoError(t, err)
@@ -29,7 +29,7 @@ func TestNoOpThrottlerNeverThrottles(t *testing.T) {
 func TestAlwaysTrueThrottlerAlwaysThrottles(t *testing.T) {
 	th := &AlwaysTrueThrottler{}
 	entries := []deadhorse.RequestEntry{
-		{Key: "a", Limit: deadhorse.Limit{Capacity: 1000, EmissionInterval: 1}},
+		{Key: "a", Limit: deadhorse.Limit{Capacity: 1000, Rate: deadhorse.Rate{Units: 1, Period: 1}}},
 	}
 	got, err := th.Throttle(context.Background(), entries)
 	require.NoError(t, err)
