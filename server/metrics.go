@@ -39,7 +39,10 @@ var (
 		Namespace: "deadhorse",
 		Name:      "request_duration_seconds",
 		Help:      "Time to handle one DHP/1 command line, by command.",
-		Buckets:   latencyBuckets,
+		// Native-histogram-only: Buckets is deliberately left unset (see
+		// throttleBatchSize below for why that leaves no classic buckets).
+		NativeHistogramBucketFactor:    nativeHistogramBucketFactor,
+		NativeHistogramMaxBucketNumber: nativeHistogramMaxBucketNumber,
 	}, []string{"command"})
 
 	throttleEntriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -52,14 +55,18 @@ var (
 		Namespace: "deadhorse",
 		Name:      "throttle_batch_size",
 		Help:      "Number of entries carried by one THROTTLE line.",
-		Buckets:   prometheus.ExponentialBuckets(1, 2, 8), // 1..128
+		// Leaving Buckets nil/empty while NativeHistogramBucketFactor is set
+		// means no classic buckets are created at all -- see HistogramOpts.Buckets.
+		NativeHistogramBucketFactor:    nativeHistogramBucketFactor,
+		NativeHistogramMaxBucketNumber: nativeHistogramMaxBucketNumber,
 	})
 
 	lineLength = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "deadhorse",
-		Name:      "line_length_bytes",
-		Help:      "Length in bytes of each protocol line read, excluding the terminator.",
-		Buckets:   prometheus.ExponentialBuckets(16, 4, 8), // 16..262144
+		Namespace:                      "deadhorse",
+		Name:                           "line_length_bytes",
+		Help:                           "Length in bytes of each protocol line read, excluding the terminator.",
+		NativeHistogramBucketFactor:    nativeHistogramBucketFactor,
+		NativeHistogramMaxBucketNumber: nativeHistogramMaxBucketNumber,
 	})
 
 	lineTooLongTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -69,9 +76,16 @@ var (
 	})
 )
 
-// latencyBuckets spans microseconds to a second: command handling here is
-// in-memory and lock-bound (see gcraCheck), so prometheus.DefBuckets --
-// which starts at 5ms -- would put nearly every observation in one bucket.
-var latencyBuckets = []float64{
-	1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1,
-}
+const (
+	// nativeHistogramBucketFactor of 1.1 is the trade-off the client_golang
+	// docs recommend: each bucket at most 10% wider than the last (8 buckets
+	// per power of two).
+	nativeHistogramBucketFactor = 1.1
+
+	// nativeHistogramMaxBucketNumber caps how many sparse buckets a single
+	// histogram may populate. line_length_bytes and throttle_batch_size are
+	// driven by values a DHP/1 client controls directly, so leaving this
+	// unbounded (the default) would make an unlimited-bucket native
+	// histogram a memory-DoS vector -- see HistogramOpts.NativeHistogramMaxBucketNumber.
+	nativeHistogramMaxBucketNumber = 160
+)

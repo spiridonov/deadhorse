@@ -210,11 +210,16 @@ coordination service, nothing to run besides the process itself.
 | `keys{generation}` | Gauge | Keys held by the store, `generation="hot"` or `"cold"` (refreshed every 5s, independent of `-gc-interval`) |
 | `connections` | Gauge | Currently open DHP/1 connections |
 | `requests_total{command}` | Counter | Command lines handled, by command (`HELLO`/`THROTTLE`/`PING`/`STATS`/`QUIT`/`unknown`) |
-| `request_duration_seconds{command}` | Histogram | Time to handle one command line, by command |
+| `request_duration_seconds{command}` | Native histogram | Time to handle one command line, by command |
 | `throttle_entries_total{mode,result}` | Counter | `THROTTLE` entries evaluated, by `mode` (`real`/`peek`/`unknown`) and `result` (`admitted`/`throttled`/`err`) |
-| `throttle_batch_size` | Histogram | Entries per `THROTTLE` line |
-| `line_length_bytes` | Histogram | Length of each protocol line read |
+| `throttle_batch_size` | Native histogram | Entries per `THROTTLE` line |
+| `line_length_bytes` | Native histogram | Length of each protocol line read |
 | `line_too_long_total` | Counter | Connections dropped for exceeding `-max-line-size` |
+
+The three histograms are [native histograms](https://prometheus.io/docs/specs/native_histograms/)
+only — no classic buckets, so they only carry useful data when scraped by a collector that asks
+for them (Prometheus with `--enable-feature=native-histograms`, or an equivalent Mimir/Grafana Agent
+setting); a plain classic-only scrape sees them collapse to a single `+Inf` bucket.
 
 ## Client libraries
 
