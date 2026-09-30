@@ -101,7 +101,7 @@ type shardConn struct {
 // semaphore that admits calls into it, so a submit blocked waiting for room
 // can wait on sem alone -- without holding shardConn's mu -- while still
 // being guaranteed that, once it holds a token, enqueuing into pending will
-// never itself block: sem starts pre-loaded with exactly maxInFlight
+// never itself block: sem starts preloaded with exactly maxInFlight
 // tokens, and a token only ever comes back once its call has actually left
 // pending (see readLoop and drainPending), so #tokens-held can never exceed
 // pending's remaining capacity.

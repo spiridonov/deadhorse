@@ -99,7 +99,7 @@ func (b *circuitBreaker) recordSuccess() {
 // reason attributable to the shard (see exchange's shardFault return --
 // this must never be called for a failure that was actually the caller's
 // own ctx ending first). trialInFlight being true means this failure came
-// from the trial: reopen the breaker and restart its cooldown. Otherwise
+// from the trial: reopen the breaker and restart its cooldown. Otherwise,
 // just count the failure, opening the breaker for the first time once
 // failureThreshold consecutive failures is reached.
 func (b *circuitBreaker) recordFailure() {

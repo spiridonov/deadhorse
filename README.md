@@ -4,7 +4,7 @@
 
 > The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse/discover/).
 
-DeadHorse is a small, high perfomance, distributed rate limiter. A DeadHorse server holds
+DeadHorse is a small, high performance, distributed rate limiter. A DeadHorse server holds
 nothing but counters — the limit itself (how big the bucket is, how fast it drains) comes
 with every request. And it talks a plain, newline-delimited text protocol simple enough to
 implement a client for in any language with nothing more than a socket and a few string
@@ -18,7 +18,7 @@ RESULT user:42:writes|0|100|0
 
 ## Why it's built this way
 
-Precision is traded for perfomance, simplicity, and high availability:
+Precision is traded for performance, simplicity, and high availability:
 
 - **Limits travel with the request.** A DeadHorse process never has its own copy of "user 42 gets
   100 writes/sec" rule anywhere in memory — every `THROTTLE` request carries its own
