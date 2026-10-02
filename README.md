@@ -2,7 +2,7 @@
 
 [![Go](https://github.com/spiridonov/deadhorse/actions/workflows/go.yml/badge.svg)](https://github.com/spiridonov/deadhorse/actions/workflows/go.yml)
 
-> The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse/discover/).
+> The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse-point/).
 
 DeadHorse is a small, high performance, distributed rate limiter. A DeadHorse server holds
 nothing but counters — the limit itself (how big the bucket is, how fast it drains) comes
