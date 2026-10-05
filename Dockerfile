@@ -9,5 +9,6 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /out/deadhorse /deadhorse
+USER nonroot:nonroot
 EXPOSE 9000 9090
 ENTRYPOINT ["/deadhorse"]

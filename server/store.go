@@ -3,6 +3,8 @@ package server
 import (
 	"sync"
 	"time"
+
+	"github.com/spiridonov/deadhorse/internal/fnv1a"
 )
 
 // DefaultStripes and DefaultGCInterval are what newStore falls back to when
@@ -153,7 +155,7 @@ func (st *store) close() {
 }
 
 func (st *store) stripeFor(key string) *stripe {
-	return st.stripes[fnv1a(key)%uint64(len(st.stripes))]
+	return st.stripes[fnv1a.Hash(key)%uint64(len(st.stripes))]
 }
 
 func (st *store) keyCountEstimate() int {
@@ -173,16 +175,4 @@ func (st *store) keyCounts() (hot, cold int) {
 		cold += c
 	}
 	return
-}
-
-func fnv1a(s string) uint64 {
-	const offset64 = 14695981039346656037
-	const prime64 = 1099511628211
-
-	h := uint64(offset64)
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= prime64
-	}
-	return h
 }

@@ -4,11 +4,11 @@
 
 > The name comes from [Dead Horse Point in Utah](https://stateparks.utah.gov/parks/dead-horse-point/).
 
-DeadHorse is a small, high performance, distributed rate limiter. A DeadHorse server holds
-nothing but counters — the limit itself (how big the bucket is, how fast it drains) comes
-with every request. And it talks a plain, newline-delimited text protocol simple enough to
-implement a client for in any language with nothing more than a socket and a few string
-operations. It has been tested to hold at least 20M keys at 220K rps per one process.
+DeadHorse is a small, zero dependency, high performance, distributed rate limiter. A DeadHorse
+server holds nothing but counters — the limit itself (how big the bucket is, how fast it drains)
+comes with every request. And it talks a plain, newline-delimited text protocol simple enough to
+implement a client for in any language with nothing more than a socket and a few string operations.
+It has been tested to hold at least 20M keys at 220K rps per one process.
 
 ```
 $ nc localhost 9000
@@ -199,7 +199,7 @@ deadhorse
 Or run in Docker:
 
 ```sh
-docker run spiridonov1/deadhorse
+docker run spiridonov1/deadhorse -p 9000:9000 -p 9090:9090
 ```
 
 | Flag | Default | Meaning |

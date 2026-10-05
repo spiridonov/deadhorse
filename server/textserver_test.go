@@ -71,6 +71,28 @@ func TestParseEntry(t *testing.T) {
 	}
 }
 
+func TestSplitCommand(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		wantCmd  string
+		wantRest string
+	}{
+		{"no rest", "PING", "PING", ""},
+		{"space-separated", "THROTTLE key|1|1|1|1|R", "THROTTLE", " key|1|1|1|1|R"},
+		{"tab-separated", "HELLO\t1", "HELLO", "\t1"},
+		{"non-breaking-space-separated", "HELLO 1", "HELLO", " 1"},
+		{"empty", "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd, rest := splitCommand(c.line)
+			assert.Equal(t, c.wantCmd, cmd)
+			assert.Equal(t, c.wantRest, rest)
+		})
+	}
+}
+
 func TestFormatResult(t *testing.T) {
 	assert.Equal(t, "key|0|5|0", formatResult(deadhorse.ResponseEntry{Key: "key", Throttled: false, Remaining: 5, RetryAfter: 0}))
 	assert.Equal(t, "key|1|0|1000", formatResult(deadhorse.ResponseEntry{Key: "key", Throttled: true, Remaining: 0, RetryAfter: 1000}))
@@ -127,6 +149,22 @@ func TestDispatchQuit(t *testing.T) {
 	resp, closeConn := srv.dispatch("QUIT")
 	assert.Empty(t, resp, "QUIT must not produce a response line")
 	assert.True(t, closeConn)
+}
+
+func TestDispatchCommandSplitsOnAnyWhitespaceNotJustASpaceliteral(t *testing.T) {
+	// Regression test: dispatch used to split the command word via
+	// strings.Cut(line, " ") -- a literal space -- while every downstream
+	// parser (handleHello/handleThrottle's strings.Fields, and the client's
+	// decodeResult) treats any Unicode whitespace as a separator. A tab (or
+	// other non-space whitespace) between the command and its arguments
+	// must still be recognized.
+	srv := NewTextServer(&deadhorsetest.NoOpThrottler{}, 0)
+
+	resp, _ := srv.dispatch("HELLO\t1")
+	assert.Equal(t, "OK 1", resp, "a tab between command and argument must split just like a space")
+
+	resp, _ = srv.dispatch("PING")
+	assert.Equal(t, "PONG", resp)
 }
 
 func TestDispatchUnknownCommand(t *testing.T) {
@@ -334,9 +372,47 @@ func TestTextServerListenAndServeAndClose(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		assert.Error(t, err, "ListenAndServe should return once its listener is closed")
+		assert.NoError(t, err, "ListenAndServe should return nil once its listener is closed via a requested Close, not report that as a failure")
 	case <-time.After(2 * time.Second):
 		t.Fatal("ListenAndServe did not return after Close")
+	}
+}
+
+func TestTextServerListenAndServeReturnsRealErrorWhenNotClosedByUs(t *testing.T) {
+	// A genuine accept failure -- the listener's fd torn down by something
+	// other than our own Close() -- must still surface as a real error, not
+	// get swallowed by the same "this was a requested shutdown" nil that
+	// ListenAndServe now reports when Close() is what caused Accept to fail.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := probe.Addr().String()
+	require.NoError(t, probe.Close())
+
+	srv := NewTextServer(&deadhorsetest.NoOpThrottler{}, 0)
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe(addr) }()
+
+	require.Eventually(t, func() bool {
+		c, dialErr := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if dialErr != nil {
+			return false
+		}
+		c.Close()
+		return true
+	}, 2*time.Second, 10*time.Millisecond, "ListenAndServe should bind and accept promptly")
+
+	// Close the underlying listener directly -- not through srv.Close() --
+	// so s.closed stays false, the same way an external failure would.
+	srv.listenerMu.Lock()
+	lis := srv.listener
+	srv.listenerMu.Unlock()
+	require.NoError(t, lis.Close())
+
+	select {
+	case err := <-errCh:
+		assert.Error(t, err, "a genuine accept failure (not caused by our own Close) must still be reported as an error")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ListenAndServe did not return after its listener failed")
 	}
 }
 
@@ -354,7 +430,7 @@ func TestTextServerCloseBeforeListenAndServePreventsAcceptLoop(t *testing.T) {
 	require.NoError(t, srv.Close())
 
 	err := srv.ListenAndServe("127.0.0.1:0")
-	assert.ErrorIs(t, err, net.ErrClosed, "ListenAndServe must refuse to serve once Close has already been requested")
+	assert.NoError(t, err, "ListenAndServe must refuse to serve (and report that cleanly, not as an error) once Close has already been requested")
 }
 
 func TestTextServerPingPong(t *testing.T) {

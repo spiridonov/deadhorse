@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/spiridonov/deadhorse"
 )
@@ -98,7 +99,12 @@ func NewTextServer(throttler Throttler, maxLineSize int) *TextServer {
 }
 
 // ListenAndServe accepts connections on addr until the listener is closed
-// (via Close), serving each on its own goroutine.
+// (via Close), serving each on its own goroutine. It returns nil once that
+// shutdown was actually requested via Close, and a non-nil error only for a
+// genuine bind/accept failure -- mirroring the err != nil convention callers
+// already use to decide whether something actually went wrong, rather than
+// making every caller separately check errors.Is(err, net.ErrClosed) to tell
+// "you asked me to stop" apart from "something broke."
 func (s *TextServer) ListenAndServe(addr string) error {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -108,10 +114,11 @@ func (s *TextServer) ListenAndServe(addr string) error {
 	s.listenerMu.Lock()
 	if s.closed {
 		// Close() already ran, before net.Listen above even returned --
-		// there's nothing left to bind and accept for.
+		// there's nothing left to bind and accept for, but this is the
+		// shutdown that was asked for, not a failure.
 		s.listenerMu.Unlock()
 		lis.Close()
-		return net.ErrClosed
+		return nil
 	}
 	s.listener = lis
 	s.listenerMu.Unlock()
@@ -119,6 +126,12 @@ func (s *TextServer) ListenAndServe(addr string) error {
 	for {
 		conn, err := lis.Accept()
 		if err != nil {
+			s.listenerMu.Lock()
+			closedByUs := s.closed
+			s.listenerMu.Unlock()
+			if closedByUs {
+				return nil
+			}
 			return err
 		}
 		go s.handleConn(conn)
@@ -202,7 +215,7 @@ func readLine(r *bufio.Reader, maxSize int) (string, error) {
 }
 
 func (s *TextServer) dispatch(line string) (response string, closeConn bool) {
-	cmd, rest, _ := strings.Cut(line, " ")
+	cmd, rest := splitCommand(line)
 
 	// Labeled by the normalized command, never the raw one: cmd is whatever
 	// token a client sent first, and labeling with it verbatim would let a
@@ -228,6 +241,26 @@ func (s *TextServer) dispatch(line string) (response string, closeConn bool) {
 	default:
 		return "ERROR unknown command", false
 	}
+}
+
+// splitCommand splits line into its first whitespace-delimited token (the
+// command word) and everything after that token, using the same definition
+// of "whitespace" -- any unicode.IsSpace rune, not just a literal ' ' --
+// that every downstream parser already uses (handleHello's and
+// handleThrottle's own strings.Fields calls, and the client's decodeResult).
+// Splitting on a literal ' ' here while those split on any whitespace rune
+// would make a line like "PING\t" (a tab instead of a space) fail to match
+// any known command.
+func splitCommand(line string) (cmd, rest string) {
+	start := strings.IndexFunc(line, func(r rune) bool { return !unicode.IsSpace(r) })
+	if start < 0 {
+		return "", ""
+	}
+	line = line[start:]
+	if end := strings.IndexFunc(line, unicode.IsSpace); end >= 0 {
+		return line[:end], line[end:]
+	}
+	return line, ""
 }
 
 // normalizeCommand maps an arbitrary first token to one of the known DHP/1

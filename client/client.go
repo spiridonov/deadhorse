@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spiridonov/deadhorse"
+	"github.com/spiridonov/deadhorse/internal/fnv1a"
 )
 
 const defaultTimeout = 10 * time.Millisecond
@@ -139,7 +140,7 @@ func (c *ShardedClient) shardFor(key string) int {
 	if len(c.shards) == 1 {
 		return 0
 	}
-	return int(fnv1a(key) % uint64(len(c.shards)))
+	return int(fnv1a.Hash(key) % uint64(len(c.shards)))
 }
 
 // Close closes every shard's connection.
@@ -147,16 +148,4 @@ func (c *ShardedClient) Close() {
 	for _, s := range c.shards {
 		s.close()
 	}
-}
-
-func fnv1a(s string) uint64 {
-	const offset64 = 14695981039346656037
-	const prime64 = 1099511628211
-
-	h := uint64(offset64)
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= prime64
-	}
-	return h
 }

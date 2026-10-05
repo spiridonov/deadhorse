@@ -1,0 +1,60 @@
+name: Docker release
+
+# Publishes spiridonov1/deadhorse (see README.md's "Run in Docker" section)
+# as a multi-arch image on every semver release tag -- e.g. pushing tag
+# v1.2.3 publishes 1.2.3, 1.2, 1, and latest, all pointing at one manifest
+# list covering both platforms.
+#
+# Requires two repo secrets: DOCKERHUB_USERNAME (the Docker Hub account/org
+# that owns the spiridonov1/deadhorse repository) and DOCKERHUB_TOKEN (an
+# access token for it, not the account password -- create one under Docker
+# Hub's Account Settings -> Security). Without these, docker/login-action
+# below fails and nothing is pushed.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive image tags/labels from the git tag
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: spiridonov1/deadhorse
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

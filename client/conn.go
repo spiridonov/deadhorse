@@ -456,20 +456,57 @@ func isKeyDelimiter(r rune) bool {
 	return unicode.IsSpace(r) || r == '|'
 }
 
-// encodeThrottle assumes every entry has already passed validateKey.
+// maxEncodedEntryOverhead bounds the non-key bytes one entry contributes on
+// the wire: four '|'-prefixed int64s (each up to 20 digits, including a
+// leading '-'), a '|'-prefixed mode byte, and a leading ' ' separator.
+const maxEncodedEntryOverhead = 4*(1+20) + 1 + 1 + 1
+
+// encodeThrottle assumes every entry has already passed validateKey. It
+// writes directly into a pre-sized strings.Builder rather than building a
+// []string of per-entry fmt.Sprintf results and strings.Join-ing them, to
+// avoid the two-allocations-per-entry (plus the join's own copy) that would
+// otherwise cost on this hot path.
 func encodeThrottle(entries []deadhorse.RequestEntry) string {
-	parts := make([]string, len(entries))
-	for i, e := range entries {
-		mode := "R"
-		if e.Peek {
-			mode = "P"
-		}
-		parts[i] = fmt.Sprintf("%s|%d|%d|%d|%d|%s", e.Key, e.Limit.Capacity, deadhorse.EffectiveUnits(e.Limit.Rate.Units), int64(e.Limit.Rate.Period), deadhorse.EffectiveCost(e.Cost), mode)
-	}
-	if len(parts) == 0 {
+	if len(entries) == 0 {
 		return "THROTTLE\n"
 	}
-	return "THROTTLE " + strings.Join(parts, " ") + "\n"
+
+	var b strings.Builder
+	size := len("THROTTLE")
+	for _, e := range entries {
+		size += len(e.Key) + maxEncodedEntryOverhead
+	}
+	b.Grow(size + len("\n"))
+
+	b.WriteString("THROTTLE")
+	for _, e := range entries {
+		b.WriteByte(' ')
+		b.WriteString(e.Key)
+		b.WriteByte('|')
+		writeInt(&b, e.Limit.Capacity)
+		b.WriteByte('|')
+		writeInt(&b, deadhorse.EffectiveUnits(e.Limit.Rate.Units))
+		b.WriteByte('|')
+		writeInt(&b, int64(e.Limit.Rate.Period))
+		b.WriteByte('|')
+		writeInt(&b, deadhorse.EffectiveCost(e.Cost))
+		b.WriteByte('|')
+		if e.Peek {
+			b.WriteByte('P')
+		} else {
+			b.WriteByte('R')
+		}
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// writeInt appends v's decimal representation to b without going through
+// fmt, and without the int64-to-string conversion's own separate allocation
+// that fmt.Sprintf/strconv.Itoa would otherwise need.
+func writeInt(b *strings.Builder, v int64) {
+	var buf [20]byte // enough for the widest int64, including a leading '-'
+	b.Write(strconv.AppendInt(buf[:0], v, 10))
 }
 
 func decodeResult(line string, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
@@ -494,13 +531,22 @@ func decodeResult(line string, entries []deadhorse.RequestEntry) ([]deadhorse.Re
 		if len(fields) != 4 {
 			return nil, fmt.Errorf("deadhorse: malformed result %q", tok)
 		}
+		// Matching request to response is otherwise purely positional
+		// (resultTokens[i] <-> entries[i], already guarded by the count
+		// check above); cross-checking the echoed key against what this
+		// position's request actually asked for turns a future desync bug
+		// into a loud, immediate error instead of a silently mislabeled
+		// result.
+		if fields[0] != entries[i].Key {
+			return nil, fmt.Errorf("deadhorse: response key %q at position %d does not match request key %q -- connection desynced", fields[0], i, entries[i].Key)
+		}
 		remaining, err1 := strconv.ParseInt(fields[2], 10, 64)
 		retryAfter, err2 := strconv.ParseInt(fields[3], 10, 64)
 		if err1 != nil || err2 != nil || remaining < 0 {
 			return nil, fmt.Errorf("deadhorse: malformed result %q", tok)
 		}
 		results[i] = deadhorse.ResponseEntry{
-			Key:        fields[0],
+			Key:        entries[i].Key,
 			Throttled:  fields[1] == "1",
 			Remaining:  remaining,
 			RetryAfter: time.Duration(retryAfter),

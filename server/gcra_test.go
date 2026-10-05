@@ -246,6 +246,35 @@ func TestGcraCheckRejectionDoesNotAdvanceTAT(t *testing.T) {
 	assert.Equal(t, tat, tatAfterRejection, "TAT must be left unchanged on rejection")
 }
 
+func TestGcraCheckDebtOverflowFallbackStillThrottles(t *testing.T) {
+	// When units > 1, computing debtUnits goes through mulDivCeil(level,
+	// units, period) -- a different overflow hazard than the maxDebt/costNs
+	// checks above, since it's level (derived from a stored tat, not a
+	// caller-supplied Limit) that gets multiplied by units this time.
+	// gcraCheck's own comment argues the "capacity+1" sentinel it falls
+	// back to in that case is safe because the request is guaranteed to be
+	// throttled by the maxDebt comparison regardless of the sentinel's
+	// exact value -- verified here with concrete numbers rather than just
+	// trusting the comment.
+	const capacity, units, period = int64(1) << 62, 3, time.Duration(1)
+	const level = int64(7_000_000_000_000_000_000) // chosen so level*units overflows the 128-bit intermediate
+	const cost = 1
+
+	maxDebt, ok := mulDivFloor(capacity, int64(period), units)
+	require.True(t, ok, "maxDebt itself must not overflow -- that's what makes this scenario interesting")
+	costNs, ok := mulDivCeil(cost, int64(period), units)
+	require.True(t, ok, "costNs itself must not overflow either")
+	_, debtOverflowed := mulDivCeil(level, units, int64(period))
+	require.False(t, debtOverflowed, "level*units must actually overflow for this test to exercise the fallback branch")
+
+	throttled, remaining, retryAfterNs, admittedTAT := gcraCheck(level, 0, capacity, units, period, cost)
+	require.True(t, throttled, "level is already far beyond maxDebt; the overflow fallback must not accidentally admit")
+	assert.Zero(t, remaining, "the overflow sentinel reports a fully depleted bucket")
+	assert.EqualValues(t, level+costNs-maxDebt, retryAfterNs,
+		"retryAfter should still reflect the real (non-overflowing) maxDebt comparison, not the sentinel")
+	assert.EqualValues(t, level, admittedTAT, "rejection must not advance TAT")
+}
+
 func TestMulDivFloorAndCeil(t *testing.T) {
 	got, ok := mulDivFloor(7, 3, 2)
 	require.True(t, ok)

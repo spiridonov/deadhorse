@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -31,7 +35,20 @@ func main() {
 	defer throttler.Close()
 
 	textServer := server.NewTextServer(throttler, *maxLineSize)
-	defer textServer.Close()
+
+	// Without this, the only way ListenAndServe below ever returns is a
+	// genuine accept error, which goes straight to log.Fatalf -> os.Exit --
+	// skipping every deferred call above, including throttler.Close() (and
+	// therefore its GC goroutine's shutdown). Wiring SIGINT/SIGTERM into an
+	// explicit textServer.Close() gives ListenAndServe a clean, expected way
+	// to return so those defers actually run.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down...")
+		textServer.Close()
+	}()
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	log.Printf("Starting DeadHorse server on %s (metrics on port %d)...", addr, *prometheusPort)
