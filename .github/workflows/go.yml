@@ -44,6 +44,12 @@ jobs:
         go-version: 'stable'
 
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@v6
+      uses: golangci/golangci-lint-action@v9
       with:
-        version: latest
+        # v6 of this action (and its own `latest`) only ever resolves a
+        # golangci-lint v1.x binary, which can't parse .golangci.yml's v2
+        # config schema ("version: \"2\"", linters.settings,
+        # linters.exclusions.*) at all -- v7+ is "golangci-lint v2 only" per
+        # its own release notes. Pin the tool version explicitly too,
+        # rather than trusting "latest" to mean what it sounds like.
+        version: v2.14.0
