@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/spiridonov/deadhorse"
+	"github.com/spiridonov/deadhorse/internal/dhp1"
 )
 
 // Throttler is what TextServer needs from whatever evaluates its entries:
@@ -386,9 +387,9 @@ func parseEntry(tok string) (deadhorse.RequestEntry, bool) {
 	}
 	var peek bool
 	switch parts[5] {
-	case "R":
+	case dhp1.ModeReal:
 		peek = false
-	case "P":
+	case dhp1.ModePeek:
 		peek = true
 	default:
 		return deadhorse.RequestEntry{}, false

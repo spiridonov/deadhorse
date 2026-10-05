@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/spiridonov/deadhorse"
+	"github.com/spiridonov/deadhorse/internal/dhp1"
 )
 
 // ErrInvalidKey is wrapped into a RequestEntry's ResponseEntry.Err when its
@@ -437,23 +437,15 @@ func (c *shardConn) close() {
 	}
 }
 
+// validateKey rejects exactly what dhp1.IsKeyDelimiter does, not a narrower
+// ASCII-only blacklist: a key containing e.g. '\v' would otherwise pass
+// validation here only to get split into two wire tokens later, desyncing
+// the whole batch (see decodeResult's entry-count check).
 func validateKey(key string) error {
-	if key == "" || strings.ContainsFunc(key, isKeyDelimiter) {
+	if key == "" || strings.ContainsFunc(key, dhp1.IsKeyDelimiter) {
 		return fmt.Errorf("deadhorse: key %q is empty or contains whitespace/'|', which DHP/1 forbids: %w", key, ErrInvalidKey)
 	}
 	return nil
-}
-
-// isKeyDelimiter reports whether r is a rune the wire protocol's own
-// tokenizers -- strings.Fields, used by both the server (textserver.go's
-// dispatch/handleThrottle) and this package's own response parser
-// (decodeResult) -- treat as a delimiter: any Unicode whitespace, or '|'.
-// validateKey must reject exactly this set, not a narrower ASCII-only
-// blacklist: a key containing e.g. '\v' would otherwise pass validation
-// here only to get split into two wire tokens later, desyncing the whole
-// batch (see decodeResult's entry-count check).
-func isKeyDelimiter(r rune) bool {
-	return unicode.IsSpace(r) || r == '|'
 }
 
 // maxEncodedEntryOverhead bounds the non-key bytes one entry contributes on
@@ -492,9 +484,9 @@ func encodeThrottle(entries []deadhorse.RequestEntry) string {
 		writeInt(&b, deadhorse.EffectiveCost(e.Cost))
 		b.WriteByte('|')
 		if e.Peek {
-			b.WriteByte('P')
+			b.WriteString(dhp1.ModePeek)
 		} else {
-			b.WriteByte('R')
+			b.WriteString(dhp1.ModeReal)
 		}
 	}
 	b.WriteByte('\n')
