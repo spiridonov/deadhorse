@@ -53,3 +53,20 @@ jobs:
         # its own release notes. Pin the tool version explicitly too,
         # rather than trusting "latest" to mean what it sounds like.
         version: v2.14.0
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    # A single native-arch build, no push -- this is the authoritative
+    # check that the Dockerfile and .dockerignore actually still agree with
+    # the module's package layout (go.test's
+    # TestDockerBuildContextCoversCmdDeadhorseDeps catches the common
+    # "forgot a !dir/ exception" case fast and without Docker, but this is
+    # what would have actually failed, on the very next push instead of on
+    # the next release tag). The real release workflow
+    # (docker-release.yml) does the full multi-arch build+push; that's not
+    # worth repeating on every PR.
+    - name: Build Docker image (no push)
+      run: docker build -t deadhorse:ci-check .

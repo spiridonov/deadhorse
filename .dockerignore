@@ -4,5 +4,6 @@
 !client/
 !cmd/
 !deadhorsetest/
+!internal/
 !server/
 !types.go
