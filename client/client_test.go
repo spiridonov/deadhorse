@@ -541,7 +541,10 @@ func TestShardedClientShardKeyGroupsEntriesOntoOneLine(t *testing.T) {
 	// End-to-end: a per-org and a per-user check, different Keys, sent in
 	// one ShardedClient.Throttle call under one shardKey -- exactly what
 	// makes InMemoryThrottler treat them as a single transaction (see the
-	// README's DHP/1 protocol reference).
+	// README's DHP/1 protocol reference). Each entry still reports only its
+	// own check, though: org's own bucket has room, so it reports
+	// Throttled=false, even though the line it shares with user won't
+	// commit because user's own check failed.
 	th := server.NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 	addr := startServer(t, th)
@@ -562,14 +565,14 @@ func TestShardedClientShardKeyGroupsEntriesOntoOneLine(t *testing.T) {
 	results, err := c.Throttle(context.Background(), "req-1", []deadhorse.RequestEntry{org, user})
 	require.NoError(t, err)
 	require.Len(t, results, 2)
-	assert.True(t, results[0].Throttled, "org must be denied too: it shares a call/line with the failing user check")
+	assert.False(t, results[0].Throttled, "org's own bucket has room -- its own check passes even though the line it shares with user won't commit")
 	assert.True(t, results[1].Throttled, "user's own bucket is exhausted")
 
-	// Because the group was denied, org's capacity must not have been
-	// spent.
+	// Because the line didn't commit, org's capacity must not have been
+	// spent, even though its own result reported Throttled=false.
 	r, err = c.Throttle(context.Background(), "req-1", []deadhorse.RequestEntry{org})
 	require.NoError(t, err)
-	assert.False(t, r[0].Throttled, "org's bucket should still be fresh: the earlier group never committed")
+	assert.False(t, r[0].Throttled, "org's bucket should still be fresh: the earlier line never committed")
 }
 
 func TestShardedClientNoOpThrottlerViaTextServer(t *testing.T) {

@@ -28,15 +28,18 @@ const defaultTimeout = 10 * time.Millisecond
 // One call is one shard, and therefore one DHP/1 line: every entry passed
 // to a single Throttle call is sent together, and the server commits every
 // non-Peek one of them as a single all-or-none group (see
-// server.InMemoryThrottler.Throttle for exactly how). This is exactly what
-// makes shardKey the caller's tool for controlling that grouping: giving
-// two calls' worth of entries the same shardKey and sending them as one
-// Throttle call forces them onto the same shard and the same transaction;
-// entries that don't need to be decided together belong in separate calls
-// (each shardKey can simply be that entry's own Key, matching plain
-// per-key routing). Two concurrent Throttle calls never share a line just
-// because they hash to the same shard -- each becomes its own line,
-// pipelined independently over that shard's connection.
+// server.InMemoryThrottler.Throttle for exactly how) -- though each entry's
+// own ResponseEntry.Throttled only ever reports its own check, never a
+// sibling's; a caller that needs the transaction's outcome ORs Throttled
+// across the entries it sent together. This is exactly what makes shardKey
+// the caller's tool for controlling that grouping: giving two calls' worth
+// of entries the same shardKey and sending them as one Throttle call forces
+// them onto the same shard and the same transaction; entries that don't need to
+// be decided together belong in separate calls (each shardKey can simply be
+// that entry's own Key, matching plain per-key routing). Two concurrent
+// Throttle calls never share a line just because they hash to the same
+// shard -- each becomes its own line, pipelined independently over that
+// shard's connection.
 //
 // Each shard also carries its own circuit breaker (see circuitBreaker):
 // since a shardConn has no memory of a shard's health between calls, a
@@ -128,9 +131,10 @@ func NewShardedClient(addrs []string, opts ...Option) *ShardedClient {
 
 // Throttle sends every entry in one call to a single shard -- hash(shardKey)
 // % len(addrs) -- as one DHP/1 line, making the whole call one all-or-none
-// transaction for its non-Peek entries. The returned slice is always fully
-// populated, in the caller's original order, even when the returned error
-// is non-nil.
+// transaction for its non-Peek entries (see ResponseEntry.Throttled for what
+// each entry reports versus what the transaction as a whole committed). The
+// returned slice is always fully populated, in the caller's original
+// order, even when the returned error is non-nil.
 func (c *ShardedClient) Throttle(ctx context.Context, shardKey string, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
 	shard := c.shardFor(shardKey)
 	return c.shards[shard].throttle(ctx, entries, c.timeout, c.failOpen)

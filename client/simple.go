@@ -26,11 +26,12 @@ func NewClient(addr string, opts ...Option) *Client {
 
 // Throttle sends every entry together as one DHP/1 line -- one all-or-none
 // transaction for its non-Peek entries (see server.InMemoryThrottler.Throttle
-// for exactly how). Unlike ShardedClient.Throttle, there's no shardKey
-// argument: with a single server there's nothing to route, so every call is
-// already the whole transaction. The returned slice is always fully
-// populated, in the caller's original order, even when the returned error is
-// non-nil.
+// for exactly how, and ResponseEntry.Throttled for what each entry reports
+// versus what the transaction as a whole committed). Unlike
+// ShardedClient.Throttle, there's no shardKey argument: with a single server
+// there's nothing to route, so every call is already the whole transaction.
+// The returned slice is always fully populated, in the caller's original
+// order, even when the returned error is non-nil.
 func (c *Client) Throttle(ctx context.Context, entries []deadhorse.RequestEntry) ([]deadhorse.ResponseEntry, error) {
 	return c.sharded.Throttle(ctx, "", entries)
 }

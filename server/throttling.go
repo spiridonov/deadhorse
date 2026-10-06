@@ -24,9 +24,13 @@ import (
 //
 // One Throttle call is one transaction for its non-Peek entries: every one
 // of them is checked before any of them is written, and either all of them
-// commit or none do (see evaluateRealGroup). Peek entries are unaffected --
-// each is still evaluated and reported entirely on its own, exactly as
-// before.
+// commit or none do (see evaluateRealGroup). What each entry *reports*,
+// though, is always just its own individual check -- ResponseEntry.Throttled
+// never reflects a sibling's outcome, only its own -- so a caller that wants
+// to know whether the transaction as a whole committed ORs Throttled across
+// the entries it sent together: if any one of them is true, none of them
+// were actually written. Peek entries are unaffected either way -- each is
+// still evaluated and reported entirely on its own.
 //
 // Unlike client.ShardedClient.Throttle, there is no shard key here:
 // InMemoryThrottler never shards -- there is exactly one transaction
@@ -96,10 +100,11 @@ func (t *InMemoryThrottler) Throttle(ctx context.Context, entries []deadhorse.Re
 // first, against a private, in-memory working copy of each touched key's
 // TAT, without writing anything back to the store. Only if every one of
 // them individually admits does the combined effect of all of them actually
-// get written back; otherwise none of it does, and every Real entry is
-// reported Throttled, regardless of what its own individual check said --
-// see Throttler and ResponseEntry.Throttled for why a single call needs
-// this. Peek entries never reach here at all: they're handled
+// get written back; otherwise none of it does. Each entry still *reports*
+// its own individual check, though, regardless of what the transaction as a
+// whole decided -- see Throttler and ResponseEntry.Throttled; a caller that
+// wants the transaction's outcome ORs Throttled across the entries it sent
+// together. Peek entries never reach here at all: they're handled
 // entirely separately, in Throttle above, and never interact with this
 // group in either direction.
 //
@@ -154,17 +159,15 @@ func (t *InMemoryThrottler) evaluateRealGroup(entries []deadhorse.RequestEntry, 
 		} else {
 			workingTAT[e.Key] = admittedTAT
 		}
+		// Throttled is this entry's own check, full stop -- not the group's
+		// decision (see ResponseEntry.Throttled). A sibling failing elsewhere
+		// in this same group can still mean nothing gets committed below,
+		// even for an entry that reports Throttled=false here.
+		result[i].Throttled = throttled
 		result[i].Remaining = remaining
 		result[i].RetryAfter = retryAfter
 	}
 
-	for _, i := range realIdx {
-		// Throttled is the group's decision, not each entry's own in
-		// isolation: if even one Real entry in the line was denied, the
-		// whole line is -- every Real entry reports Throttled, including
-		// ones whose own bucket had room (see ResponseEntry.Throttled).
-		result[i].Throttled = !admitAll
-	}
 	if admitAll {
 		for k, tat := range workingTAT {
 			buckets[k].tat = tat

@@ -88,17 +88,19 @@ static list of shard addresses, plain modulo hashing, and per-shard connections 
 independently.
 
 A shard is also a transaction boundary (see [DHP/1](#deadhorse-protocol-reference-dhp1)):
-`client.ShardedClient.Throttle(ctx, shardKey, entries)` treats one call as one transaction. 
+`client.ShardedClient.Throttle(ctx, shardKey, entries)` treats one call as one transaction.
 `shardKey` -- hashed to pick which shard the whole call goes to -- is what a caller uses to
 control that: every entry passed to one call is sent together as a single line, and every `R`
-entry among them commits as one all-or-none group. To batch several independent checks in one call
-the way you always could, just pass any one of their keys (or anything else) as `shardKey` -- it
-only matters when it's shared. To force two checks that *must* be decided together onto the same
-shard and the same transaction -- a per-org and a per-user check for the same request, say -- give
-that one call a `shardKey` of your choosing (a tenant ID, typically) and send both
-entries in it. `shardKey` is specific to `ShardedClient`: `server.InMemoryThrottler` (and therefore
-a bare `TextServer`) has only one shard, itself, so its own `Throttle` takes no such argument --
-every call to it is already the transaction (see [DHP/1](#deadhorse-protocol-reference-dhp1)).
+entry among them commits as one all-or-none group -- though each entry still *reports* only its
+own check, never a sibling's (see [DHP/1](#deadhorse-protocol-reference-dhp1) for exactly what
+that means). To batch several independent checks in one call the way you always could, just pass
+any one of their keys (or anything else) as `shardKey` -- it only matters when it's shared. To
+force two checks that *must* be decided together onto the same shard and the same transaction -- a
+per-org and a per-user check for the same request, say -- give that one call a `shardKey` of your
+choosing (a tenant ID, typically) and send both entries in it. `shardKey` is specific to
+`ShardedClient`: `server.InMemoryThrottler` (and therefore a bare `TextServer`) has only one
+shard, itself, so its own `Throttle` takes no such argument -- every call to it is already the
+transaction (see [DHP/1](#deadhorse-protocol-reference-dhp1)).
 
 ## Garbage collection
 
@@ -162,25 +164,31 @@ If one entry in a batch is malformed, its result is the token `ERR` and every ot
 same batch is still answered normally — a `THROTTLE` line never fails outright. Only `QUIT` and a
 line that exceeds the configured maximum length end a connection.
 
-**A line is a transaction for its `R` entries.** Every `R` entry on one line is evaluated first,
-against a private copy of each bucket it touches, without writing anything; only if every one of
-them individually admits does the whole line commit, all at once — if even one would be throttled,
-none of them are, and every `R` entry reports `throttled=1`, including ones whose own bucket had
-plenty of room. `P` entries are entirely unaffected either way: each is still evaluated and
-reported on its own, exactly as if it were the only entry on the line.
+**A line is a transaction for its `R` entries, but each still reports its own check.** Every `R` entry
+on one line is evaluated first, against a private copy of each bucket it touches, without writing
+anything; only if every one of them individually admits does the whole line commit, all at once —
+if even one would be throttled, none of them are written, no matter what any individual entry's
+own check said. What each `R` entry *reports*, though, is always just its own check: `throttled`
+never reflects a sibling's outcome, only whether that entry's own bucket had room. A caller that
+needs to know whether the line as a whole committed ORs `throttled` across every `R` entry it sent
+together — true if any one of them is. `P` entries are entirely unaffected either way: each is
+still evaluated and reported on its own, exactly as if it were the only entry on the line.
 
 A worked example, batching a per-org and a per-user check in one round trip:
 
 ```
 > THROTTLE org:acme:writes|100|1|10000000|1|R user:42:writes|20|1|50000000|1|R
-< RESULT org:acme:writes|1|63|0 user:42:writes|1|0|12000000
+< RESULT org:acme:writes|0|63|0 user:42:writes|1|0|12000000
 ```
 
-The user-level check failed, so the line is denied as a whole: the org-level check reports
-`throttled=1` too, even though its own bucket had 63 units of headroom to spare (`remaining` and
-`retry_after_ns` still reflect that unused headroom — only `throttled` reflects the line's actual,
-all-or-none outcome). Neither bucket's state changed. DeadHorse has no opinion on how a caller
-combines several results from one line beyond this — that's entirely up to the caller.
+The user-level check failed, so the line as a whole doesn't commit — but the org-level check
+still reports `throttled=0`, since its own bucket had 63 units of headroom to spare: `remaining`
+and `retry_after_ns` always reflect that entry's own check, never a sibling's. Neither bucket's
+state changed, since nothing commits unless every `R` entry on the line individually admits (a
+caller can tell by OR'ing `throttled` across the line's `R` entries: `0 OR 1 = 1`, so this line
+didn't commit, even though org's own result looked fine). DeadHorse has no opinion on how a caller
+combines several results from one line beyond this all-or-none transaction rule — that's entirely
+up to the caller.
 
 `HELLO` exists for protocol/version negotiation; a client that skips it entirely is assumed to
 speak version `1`. DeadHorse has no authentication or encryption of its own — treat it the way
@@ -281,8 +289,8 @@ not it checks the rest.
 
 Every entry passed to one `Throttle` call is sent together as a single DHP/1 line, so it's already
 one all-or-none transaction for its non-`Peek` entries (see
-[DHP/1](#deadhorse-protocol-reference-dhp1)) — there's nothing more to configure with a single
-server.
+[DHP/1](#deadhorse-protocol-reference-dhp1) for exactly what that means for each entry's own
+`Throttled`) — there's nothing more to configure with a single server.
 
 #### Multiple servers: `ShardedClient`
 

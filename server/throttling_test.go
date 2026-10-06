@@ -157,12 +157,15 @@ func TestInMemoryThrottlerKeysAreIndependent(t *testing.T) {
 	assert.False(t, throttle1(t, th, entries[1]).Throttled, "tenant-b should be unaffected by tenant-a's usage")
 }
 
-func TestInMemoryThrottlerRealGroupIsAllOrNone(t *testing.T) {
+func TestInMemoryThrottlerRealGroupTransactionIsAllOrNoneButEachEntryReportsItsOwnCheck(t *testing.T) {
 	// The README's org/user worked example: two different keys, checked
-	// together in one call. Before all-or-none grouping, one passing and
-	// one failing would report exactly that (one throttled, one not).
-	// Now, since they share one call/line, a single denial denies the
-	// whole group -- see Throttler and ResponseEntry.Throttled.
+	// together in one call. The group still commits all-or-none -- tenant-b's
+	// capacity must not be spent just because tenant-a's check failed -- but
+	// each entry's Throttled reports only its own check, not the
+	// transaction's outcome: tenant-b's own bucket had room, so it reports
+	// Throttled=false even though nothing was actually committed. A caller
+	// that wants the transaction's outcome ORs Throttled across the entries
+	// it sent together (see Throttler and ResponseEntry.Throttled).
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 
@@ -175,10 +178,11 @@ func TestInMemoryThrottlerRealGroupIsAllOrNone(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	assert.True(t, results[0].Throttled, "tenant-a's own bucket is exhausted")
-	assert.True(t, results[1].Throttled, "tenant-b must also be denied: the group is all-or-none")
+	assert.False(t, results[1].Throttled, "tenant-b's own bucket had room -- its own check passes even though the group as a whole won't commit")
 
 	// Because the group was denied, tenant-b's capacity must not have been
-	// spent -- nothing in a failed group gets committed.
+	// spent -- nothing in a failed group gets committed, regardless of what
+	// any individual entry reported.
 	assert.False(t, throttle1(t, th, tenantB).Throttled, "tenant-b's own bucket should still be fresh, since the earlier group never committed")
 }
 

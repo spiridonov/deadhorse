@@ -486,11 +486,13 @@ func TestTextServerThrottleBatchMultipleKeys(t *testing.T) {
 	assert.Equal(t, "RESULT tenant-a|0|1|0 tenant-b|0|1|0", got)
 }
 
-func TestTextServerThrottleBatchAllOrNone(t *testing.T) {
-	// Mirrors the README's worked example: a per-org and a per-user check
-	// on one line. Exhaust the user-level bucket first, then send both
-	// together -- since they now share a line, the org check (which has
-	// plenty of headroom on its own) must be denied too.
+func TestTextServerThrottleBatchTransactionIsAllOrNoneButEachResultIsItsOwn(t *testing.T) {
+	// Mirrors the README's worked example: a per-org and a per-user check on
+	// one line. Exhaust the user-level bucket first, then send both
+	// together -- org's own check still passes (it reports throttled=0, its
+	// own remaining/retry_after), but the line as a whole still doesn't
+	// commit because user's check failed: a follow-up org-only call proves
+	// org's capacity was never actually spent.
 	th := NewInMemoryThrottler(0, time.Hour)
 	defer th.Close()
 	addr := startTestServer(t, th)
@@ -505,12 +507,13 @@ func TestTextServerThrottleBatchAllOrNone(t *testing.T) {
 	// user's retry_after is "just under an hour" (some of the interval
 	// already drained by wall-clock time since the warm-up call above), so
 	// match it as a pattern rather than pin the exact nanosecond count --
-	// the point under test is that org's result flips to throttled too,
-	// with its own remaining/retry_after (100, 0) otherwise unchanged.
-	assert.Regexp(t, `^RESULT org:acme:writes\|1\|100\|0 user:42:writes\|1\|0\|\d+$`, got,
-		"the whole line is denied because the user-level check is: org's own remaining/retry_after are unchanged, only its throttled bit flips")
+	// the point under test is that org's own result stays throttled=0 even
+	// though the line it shares with user won't commit.
+	assert.Regexp(t, `^RESULT org:acme:writes\|0\|100\|0 user:42:writes\|1\|0\|\d+$`, got,
+		"org's own check passes (its own bucket has room) even though user's check -- sharing this line -- fails")
 
-	// The org bucket must not have been touched by the denied line.
+	// The org bucket must not have been touched by the line that didn't
+	// commit, even though org's own result reported throttled=0.
 	got = client.sendRecv("THROTTLE org:acme:writes|100|1|" + hourNS + "|1|R")
 	assert.Equal(t, "RESULT org:acme:writes|0|100|0", got, "org's bucket should still be fresh: the earlier line never committed")
 }

@@ -52,14 +52,17 @@ type RequestEntry struct {
 // same order and at the same index as its request.
 type ResponseEntry struct {
 	Key string
-	// Throttled reports whether this request was denied. Its own meaning is
-	// unchanged by the all-or-none transaction one Throttle call forms for
-	// its non-Peek entries (see server.InMemoryThrottler.Throttle): it
-	// still just says whether this request was admitted. What can change
-	// is the reason -- a non-Peek entry can come back Throttled even
-	// though its own bucket had room, if another non-Peek entry sharing
-	// its call was denied; nothing about this field's shape or the wire
-	// format changes to reflect that.
+	// Throttled reports whether this specific request's own check failed --
+	// full stop, regardless of what any other entry sharing its call
+	// reported. It does not, by itself, say whether this request's effect
+	// was actually committed: non-Peek entries sharing one Throttle call
+	// still form a single all-or-none transaction (see
+	// server.InMemoryThrottler.Throttle) -- if even one of them fails its
+	// own check, none of them are written, even for an entry that reports
+	// Throttled=false here because its own bucket had room. A caller that
+	// needs to know whether the transaction actually committed ORs
+	// Throttled across every non-Peek entry it sent together in one call:
+	// true if any of them is.
 	Throttled bool
 	// Remaining is the bucket's headroom in cost units as of just before
 	// this request, clamped to [0, Limit.Capacity] -- not affected by this

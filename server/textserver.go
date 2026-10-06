@@ -18,8 +18,10 @@ import (
 
 // Throttler is what TextServer needs from whatever evaluates its entries:
 // one call, one all-or-none transaction for its non-Peek entries (Peek
-// entries are always independent -- see RequestEntry.Peek), full stop. How
-// many internal steps that takes is entirely up to the implementation.
+// entries are always independent -- see RequestEntry.Peek), full stop --
+// though each entry still reports only its own check, not whether the
+// transaction as a whole committed (see ResponseEntry.Throttled). How many
+// internal steps that takes is entirely up to the implementation.
 // InMemoryThrottler is the one built into this package; a custom
 // implementation can be plugged into NewTextServer instead, for example in
 // tests that want TextServer's line-parsing and dispatch behavior exercised
